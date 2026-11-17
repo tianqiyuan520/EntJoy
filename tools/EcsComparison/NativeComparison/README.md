@@ -1,4 +1,4 @@
-# NativeComparison：Flecs / EnTT 对照臂
+﻿# NativeComparison：Flecs / EnTT 对照臂
 
 与 `tools/EcsComparison` 的 .NET 侧（EntJoy、Arch、Unity DOTS）共用 kernel、实体数、测量协议与输出格式，产出同一套 `MATRIX_RESULT` 行后可合并成一张表。结果按**语言**分组对比：C++ 与 C++、C# 与 C#。
 
@@ -57,6 +57,7 @@ Unity 的遍历与结构变更同源：都用 `Builds/PlayerIL2CPP` 的 IL2CPP �
 - **同一进程内成对交替**（`--ab-pair`，轮内 A/B 顺序反转）是唯一可用的比较方式；跨进程只允许聚合出 min / 中位，**不同进程的数字不得相除或相减**。
 - 需要绝对位置时用 `min`：轮内最小值在同一构建内重复性最好（同格 3 个进程相差 ≤5%）；中位会被偶发慢轮抬走。
 - 合并表里的 `median_us` 是"6 个进程-中位的聚合"，落在 min 与 max 之间，不能当成该配置的确定值；只有它的 `min_us` 与趋势可用。
+- **两条路径的读数不能互比**：`--traversal-matrix` 每个臂新建 10 万实体世界（合并 CSV 与跨框架比较走这条），`--ab-pair` 在一个进程里复用同一个探针反复测（同框架内的相对影响走这条）。同一配置 100k×3 的 EntJoy C++ `IJobChunk.Run` 在矩阵路径是 15.6–20.9 µs、在 `--ab-pair` 是 12.4–13.4 µs。跨框架只允许用矩阵口径的数字。
 
 .NET 侧的 JIT 配置也是口径的一部分：`DOTNET_TieredCompilation=0` 与默认（tiered + dynamic PGO）会改变托管臂的读数，100k×2 的 `foreach` 臂为 177.9 对 93.9 µs（1.9 倍），`IJobChunk.Run`（C#）不变。C++ 臂不受影响（12.5 对 12.5）。合并表里的 C# 组读数来自 tiering 关闭的会话，引用时须与同口径的会话比较。
 
@@ -90,103 +91,99 @@ git clone --depth 1 --branch v4.0.0 https://github.com/skypjack/entt.git third_p
 
 ## 结果
 
-单线程，3 次独立进程取中位（.NET / 原生每次 2 轮共 6 个样本，Unity IL2CPP Player 每次单轮共 3 个样本），clang 23.1.1 `-O2`（`results/native-vs-dotnet-clang-o2-summary.csv`，2026-11-15，AMD Ryzen 7 8845H）。单位 µs/次遍历。
+单线程，3 次独立进程取中位（.NET / 原生每次 2 轮共 6 个样本，Unity IL2CPP Player 每次单轮共 3 个样本），AMD Ryzen 7 8845H。单位 µs/次遍历。`results/native-vs-dotnet-clang-o2-summary.csv` 是合并视图：C++ / C# 行来自 2026-11-17 的会话，Unity 行沿用 2026-11-15 的 IL2CPP Player 会话（Player 日志未入库）。
 
-### C++ 组（合并 CSV 视图）
+### C++ 组（10 万，矩阵口径）
 
-这组是 `results/native-vs-dotnet-clang-o2-summary.csv` 的合并视图，直接由 `MATRIX_RESULT` 行聚合。它不对齐块数与编译参数，10 万档的进程级波动可达 1.6 倍；跨框架结论以下一节"对齐后"为准，1 千档见"1 千档不进对比"。
-
-| 形式 | 框架 | 路径 | 10 万 × 2 | 10 万 × 3 | 1 千 × 2 | 1 千 × 3 |
-| --- | --- | --- | --- | --- | --- | --- |
-| Query | **Flecs** | `iter-span`（query 语义，块级实现） | **7.41** | **11.36** | **0.11** | **0.15** |
-| Query | EntJoy | `IJobEntity.Run`（C++ 转译） | 9.76 | 16.54 | 0.90 | 0.52 |
-| Query | EnTT | `group-each`（owned view，官方最快） | 42.62 | 59.04 | 0.39 | 0.54 |
-| Query | EnTT | `view.each` | 115.56 | 222.57 | 1.14 | 2.19 |
-| Chunk | Flecs | `iter-span` | 7.41 | 11.36 | 0.11 | 0.15 |
-| Chunk | EntJoy | `IJobChunk.Run`（C++ 转译） | 8.36 | 16.63 | 1.17 | 0.52 |
-| Chunk | EnTT | 无 chunk 级 API | — | — | — | — |
-
-Flecs 没有逐实体回调 API，但它的 `ecs_query_iter` 是 query 遍历（块级实现），所以在 Query 与 Chunk 两张表里都出现。EnTT 的 `view.each` 每次遍历逐实体查 sparse 表，换成官方 owned `group` 后快 2.7–3.8 倍（115.56 → 42.62，222.57 → 59.04），这是它在该形式的真实最好成绩。
-
-### C++ 组（对齐后）
-
-10 万实体，单线程，`results/aligned-cpp-group-summary.csv`。每格给 min / 中位（单位 µs）；样本是该配置下全部轮次的中位，原生侧 6 个（2 轮 × 3 进程）、EntJoy 侧 21 个（7 轮 × 3 进程）。原始日志不入库（`results/*.log` 被忽略），CSV 是聚合结果，每行的 `source` 列写明产出命令。
+跨框架结论只从这张表读：两边由同一个矩阵 harness 产出（每个臂新建 10 万实体世界、3 进程 × 2 轮、每轮方法顺序正逆交替）。每格是 min / 中位（µs），来源 `results/aligned-cpp-group-summary.csv` 里 `harness=matrix` 的行。
 
 | 形式 | 框架 | 路径 | 块数 | 编译器 / 档 / ISA | 10 万 × 2 | 10 万 × 3 |
 | --- | --- | --- | --- | --- | --- | --- |
-| Chunk | Flecs | `iter-span`（单 table） | 1 | clang 23.1.1 `-O2` SSE2 | 7.33 / 8.69 | 11.50 / 13.52 |
-| Chunk | Flecs | `iter-span`（13 table） | 13 | clang 23.1.1 `-O2` SSE2 | 8.65 / 8.93 | 13.08 / 14.24 |
-| Chunk | Flecs | `iter-span`（131 table） | 131 | clang 23.1.1 `-O2` SSE2 | 14.11 / 14.80 | 21.72 / 25.37 |
-| Query | EnTT | `group-each` | — | clang 23.1.1 `-O2` SSE2 | 41.55 / 45.00 | 58.75 / 63.97 |
-| Chunk | EntJoy | `IJobChunk.Run` 默认容量 | 105 / 131 | clang-cl 19.1.5 `-O3` AVX2 | 7.40 / 8.45 | 12.40 / 13.35 |
-| Chunk | EntJoy | `IJobChunk.Run` 容量 65536 | 2 | clang-cl 19.1.5 `-O3` AVX2 | 6.20 / 6.70 | 11.70 / 12.75 |
-| Chunk | EntJoy | `IJobChunk.Run` 默认容量 | 105 / 131 | clang-cl 19.1.5 `-O2` AVX2 | 7.40 / 8.40 | 12.40 / 13.70 |
-| Chunk | EntJoy | `IJobChunk.Run` 容量 65536 | 2 | clang-cl 19.1.5 `-O2` AVX2 | 6.30 / 6.80 | 12.30 / 12.90 |
-| Chunk | EntJoy | `IJobChunk.Run` 默认容量 | 105 / 131 | clang-cl 23.1.1 `-O2` SSE2 | 10.00 / 10.90 | 16.30 / 17.20 |
-| Chunk | EntJoy | `IJobChunk.Run` 容量 65536 | 2 | clang-cl 23.1.1 `-O2` SSE2 | 7.60 / 8.20 | 12.30 / 12.70 |
+| Query | **Flecs** | `iter-span`（单 table） | 1 | clang 23.1.1 `-O2` SSE2 | **7.85 / 8.32** | **12.68 / 14.43** |
+| Chunk | Flecs | `iter-span`（单 table） | 1 | clang 23.1.1 `-O2` SSE2 | 7.85 / 8.32 | 12.68 / 14.43 |
+| Chunk | Flecs | `iter-span`（131 table） | 131 | clang 23.1.1 `-O2` SSE2 | 14.61 / 16.50 | 23.59 / 27.07 |
+| Query | EntJoy | `IJobEntity.Run` 默认容量 | 105 / 131 | clang-cl 19.1.5 `-O3` AVX2 | 9.25 / 11.33 | 15.78 / 16.61 |
+| Query | EntJoy | `IJobEntity.Run` 容量 65536 | 2 | clang-cl 19.1.5 `-O3` AVX2 | 6.85 / 7.33 | 13.35 / 14.17 |
+| Chunk | EntJoy | `IJobChunk.Run` 默认容量 | 105 / 131 | clang-cl 19.1.5 `-O3` AVX2 | 9.16 / 10.56 | 15.64 / 20.93 |
+| Chunk | EntJoy | `IJobChunk.Run` 容量 65536 | 2 | clang-cl 19.1.5 `-O3` AVX2 | 6.95 / 7.84 | 13.00 / 14.28 |
+| Query | EnTT | `group-each`（owned view） | — | clang 23.1.1 `-O2` SSE2 | 43.68 / 50.87 | 69.42 / 72.23 |
+
+Flecs 没有逐实体回调 API，`ecs_query_iter` 是块级实现，所以在 Query 与 Chunk 两行都出现。EnTT 的 `view.each` 逐实体查 sparse 表，10 万×3 是 261.7 µs，换成 owned `group` 后是 72.2 µs，这是它在该形式的真实最好成绩。
 
 每格做的对齐动作：
 
-- Flecs 侧块数是存储形态，不是开关：单 table 是 1 块（原生形态），多块只能靠把实体分散到多张表（`--flecs-tables=N`，每张表各自分配 A/B/C 列）。131 块因此同时带上逐 table 查询开销与列不连续两项代价，是"131 块"的上界。
-- EntJoy 侧用 `Archetype.ChunkCapacityOverride` 改块容量：默认容量给 105 块（2 组件）/ 131 块（3 组件），容量 65536 给 2 块。容量上限是 `EntityIndexInWorld.PackedSlotLimit = 1<<16`，10 万实体做不出 1 块。
-- 编译器档：`-O3` 行是出厂构建（见"编译政策"），`-O2` 行是同一份转译源码重编；SSE2 行用 clang 23.1.1 与 Flecs/EnTT 同版本、同 `-O2`、去掉 `/arch:AVX2`。
-- 未对齐项：EntJoy 的读数是托管进程驱动原生块循环，Flecs/EnTT 是纯原生进程；目标三元组也不同。
+- Flecs 侧块数是存储形态、不是开关：单 table 是 1 块（原生形态），多块只能把实体分散到多张表（`--flecs-tables=N`，每张表各自分配 A/B/C 列）。131 块因此同时带上逐 table 查询开销与列不连续两项代价，是"131 块"的上界。
+- EntJoy 侧用 `Archetype.ChunkCapacityOverride` 改块容量：默认容量给 105 块（2 组件）/ 131 块（3 组件），容量 65536 给 2 块。上限是 `EntityIndexInWorld.PackedSlotLimit = 1<<16`，10 万实体做不出 1 块。
+- 未对齐项：EntJoy 的读数是托管进程驱动原生块循环，Flecs / EnTT 是纯原生进程；目标三元组也不同。
+- 编译档的敏感性在 `--ab-pair` 口径下单独测（共享探针，只看相对影响）：`-O2` 与 `-O3` 差 ≤3%；AVX2 降到 SSE2 后 131 块档 +29%、2 块档 ×2 +22%、×3 0…5%。
 
 结论：
 
-- 同按出厂默认（Flecs 1 块、EntJoy 105/131 块），10 万×3 是 11.50–13.52 对 12.40–13.35，两者重叠；合并表里的 11.36 对 16.63（+46%）在本机同一构建的会话里是 +8%（min）到 −1%（中位），+46% 落在进程级波动区间内。
-- 块数拉到同一档（131 对 131）时 Flecs 21.72–25.37、EntJoy 12.40–13.35，顺序反转。
-- 编译参数按 Flecs 的档（`-O2` + SSE2）重编 EntJoy、块数用 2 块对齐 Flecs 的 1 块，10 万×3 是 12.30–12.70 对 11.50–13.52，差距 0–7%，小于本机的跨进程波动。
-- 因此 C++ 组的排序由块数决定，不由循环体实现决定：Flecs 领先的量全部来自"10 万实体一张连续表"。
+- **出厂默认**（Flecs 1 块、EntJoy 105/131 块）：×2 是 8.32 对 10.56（+27%），×3 是 14.43 对 20.93（+45%）。Flecs 领先。
+- **块数是主因**：Flecs 1 块 → 131 表，×2 +98%、×3 +88%（中位）；EntJoy 131 块 → 2 块，×2 −26%、×3 −32%（同上，中位）。
+- **各自能到的最少块数**（Flecs 1 块、EntJoy 2 块）：×2 是 8.32 对 7.84（EntJoy 快 6%），×3 是 14.43 对 14.28（打平）。差距 0–6%，小于本机跨进程波动。
+- **131 块对 131 块**：Flecs 16.50 / 27.07 对 EntJoy 10.56 / 20.93，EntJoy 快 1.3–1.6 倍。Flecs 多块要连列连续性一起付，所以这一格是它的上界，不是等块数下的下界。
+- 结论 1 与结论 3 的差就是"块数"这一个变量的量级：Flecs 的领先来自 10 万实体一张连续表，不是循环体实现。
 
 复现：
 
 ```powershell
+# 合并视图（原生 3 进程 + .NET 3 进程）
+.\Export-NativeMatrix.ps1
+
 # Flecs 块粒度：1 / 13 / 131 张表
 .\native-comparison-clang-o2.exe --entities=100000 --rounds=2 --flecs-tables=131
 
-# EntJoy 块容量：0=默认，65536=2 块（10 万实体最少 2 块）
-.\bin\Release\net8.0\EcsComparison.exe --ab-pair chunk-job-cpp arch-chunk 7 65536 100000
+# EntJoy 块容量（矩阵口径，与上面同一 harness）：0=默认，65536=2 块
+..\bin\Release\net8.0\EcsComparison.exe --traversal-matrix --chunk-capacity=65536
+
+# EntJoy 块容量（共享探针，只看相对影响）
+..\bin\Release\net8.0\EcsComparison.exe --ab-pair chunk-job-cpp arch-chunk 7 65536 100000
 
 # 转译产物重编：按 build/…/Release 的编译行改 /clang:-O2 与 /arch，产出 DLL 覆盖到
 # bin\Release\net8.0\NativeTranspiled.dll，再跑上面的 --ab-pair
 ```
+```
 
 ### C# 组
 
+`results/native-vs-dotnet-clang-o2-summary.csv` 的 C# 行（2026-11-17 会话，`DOTNET_TieredCompilation=0`），单位 µs。Unity 行沿用 2026-11-15 的 IL2CPP Player 会话。
+
 | 形式 | 框架 | 路径 | 10 万 × 2 | 10 万 × 3 | 1 千 × 2 | 1 千 × 3 |
 | --- | --- | --- | --- | --- | --- | --- |
-| Query | **EntJoy** | `IJobEntity.Run`（C#） | **31.12** | **57.33** | 1.76 | 1.95 |
+| Query | **EntJoy** | `IJobEntity.Run`（C#） | **35.48** | **59.46** | 0.48 | 0.75 |
 | Query | Unity | `SystemAPI.Query`（Burst） | 93.46 | 133.06 | **0.73** | **0.99** |
-| Query | Arch | `InlineQuery` | 111.46 | 137.36 | 4.61 | 3.93 |
-| Query | EntJoy | `foreach`（C#） | 179.14 | 180.58 | 8.71 | 10.89 |
+| Query | Arch | `InlineQuery` | 126.47 | 135.75 | 1.57 | 1.61 |
+| Query | EntJoy | `foreach`（C#） | 230.93 | 154.39 | 3.50 | 2.20 |
 | Query | Unity | `SystemAPI.Query`（托管臂） | 1216.85 | 1453.97 | 12.67 | 14.28 |
-| Chunk | **Arch** | chunk `foreach` | **30.15** | **55.15** | 0.60 | 2.00 |
-| Chunk | EntJoy | `Archetype.ChunkSpan` | 30.74 | 58.80 | **0.35** | 0.57 |
-| Chunk | Arch | `CachedQuery.foreach` | 30.77 | 55.58 | 0.43 | 0.48 |
-| Chunk | EntJoy | `IJobChunk.Run`（C#） | 30.82 | 59.99 | 0.55 | 0.52 |
+| Chunk | **Arch** | chunk `foreach` | **32.61** | 60.03 | 0.45 | 0.76 |
+| Chunk | EntJoy | chunk `foreach`（C#） | 33.11 | **58.90** | 0.74 | 0.85 |
+| Chunk | EntJoy | `IJobChunk.Run`（C#） | 34.89 | 63.54 | 0.45 | 0.74 |
+| Chunk | Arch | `CachedQuery.foreach` | 37.90 | 62.04 | 0.41 | 0.59 |
+| Chunk | EntJoy | `Archetype.ChunkSpan` | 57.87 | 59.60 | 0.59 | 0.54 |
 | Chunk | Unity | `IJobChunk`（Burst） | 78.40 | 102.90 | 0.73 | 0.91 |
 
-C# 组内 EntJoy 的 query 路径领先 Arch 3.6 倍（31.12 对 111.46）；chunk 形式三家挤在 30.15–30.82，Unity Burst 慢 2.6 倍。1 千档列只作固定开销参考，不进排序。
+C# 组内 EntJoy 的 query 路径领先 Arch 3.6 倍（35.48 对 126.47）；chunk 形式 Arch 32.61 与 EntJoy 33.11 差 1.5%，`ChunkSpan` 与 `CachedQuery.foreach` 各偏一侧。Unity Burst 在本机 78.40，比 Arch 慢 2.4 倍，块数是 782 对 100（见"块粒度"）。1 千档列只作固定开销参考，不进排序。
 
 ## 块粒度
 
 两边的"块"不在同一层，读表前先看这一节。
 
 - Flecs 4.2.0 没有块尺寸参数：table 的列是一整块连续分配（`src/storage/table.c` 的列初始化按 `ecs_column_t` 向量生长，无按字节切块），一次 `ecs_query_next` 交付整张表，`iter.count` 等于表的实体数（`src/iter.c`）；公开 API 只有 `ecs_page_iter`（一个窗口，不会续页）与 `ecs_worker_iter`（把单次结果切区间）。10 万实体落在同一张表就是 1 块。
-- EntJoy 的块容量由 `Archetype.CalculateOptimalChunkCapacity` 按 16 KiB 预算算出（`Archetype.cs` 第 132–137 行，注释为"Unity 风格的小物理 Chunk"），10 万实测 2 组件 105 块、3 组件 131 块（每块 960 / 768 实体）；Arch 同期实测 1000 / 800 实体一块（100k 时 100 / 125 块），与 EntJoy 同量级。Unity 的 `query.CalculateChunkCount()` 给 782 块（约 128 实体/块），与 16 KiB 预算对不上，成因未查。`ChunkCapacityOverride` 可改，上限 `1<<16` 槽位。
-- 每块成本的量级：Flecs 1 千档 1 块 0.112 µs、131 块 2.061 µs，相减得每次交付 ≈ 15 ns；10 万档从 1 块到 131 块是 ×2 +70…93%、×3 +88…89%（中位 / min），多出来的部分远超 131 × 15 ns ≈ 2 µs，其余是列不再连续后的缺失。EntJoy 从默认 131 块降到 13 / 4 / 2 块，10 万×2 是 7.40 / 6.90 / 5.90 / 6.20（min），3 组件档的差异落在轮次波动内。
-- 读法：**块数是设计选择，不是实现质量**。EntJoy 的块按 16 KiB 目标对齐 Arch / Unity（`Archetype.cs` 第 132–137 行的 `targetChunkBytes`，注释写明"Unity 风格的小物理 Chunk"），10 万实测 960 / 768 实体一块，Arch 是 1000 / 800，同一量级；Flecs 4.2 不分块。所以 Flecs 用 1 块拿到 70–90% 的便宜，而 EntJoy 的 131 块是与 Arch / Unity 对齐的结果。把容量调到 65536 虽然让 10 万×2 从 7.40 降到 6.20，但会离开这条对齐线，只作为分离"块数"这一变量的实验臂。
-- C# 组 chunk 形式两家差 2%（30.15 对 30.74）、块数差 5%（100/125 对 105/131），是块规模对齐的直接结果。
+- EntJoy 的块容量由 `Archetype.CalculateOptimalChunkCapacity` 按 16 KiB 预算算出（`Archetype.cs` 第 132–137 行，注释为"Unity 风格的小物理 Chunk"），10 万实测 2 组件 105 块、3 组件 131 块（每块 960 / 768 实体）；Arch 同期实测 1000 / 800 实体一块（100k 时 100 / 125 块），与 EntJoy 同量级。`ChunkCapacityOverride` 可改，上限 `1<<16` 槽位。
+- Unity 的 `query.CalculateChunkCount()` 在 10 万给 782 块（约 128 实体/块），1024 给 8 块。成因是硬上限，不是字节预算：`Chunk.kChunkSize` 是 16 KiB（`Chunk.cs:347`），但 `TypeManager.MaximumChunkCapacity = 128`（`TypeManager.cs:667`）在 `EntityComponentStore.cs:2792` 取 `math.min`，128 永远先命中；`[MaximumChunkCapacity]` 只能往下调。所以 Unity 的块数是 Arch / EntJoy 的 6–7.8 倍，且无法对齐。
+- 每块成本的量级（矩阵口径）：Flecs 1 千档 1 块 0.115 µs、131 块 2.06 µs，相减得每次交付 ≈ 15 ns；10 万档从 1 块到 131 表是 ×2 中位 +98%、×3 +88%，多出来的部分远超 131 × 15 ns ≈ 2 µs，其余是列不再连续后的缺失。EntJoy 131 块 → 2 块是 ×2 中位 −26%、×3 −32%。
+- 读法：**块数是设计选择，不是实现质量**。EntJoy 的块按 16 KiB 目标对齐 Arch（960 / 768 对 1000 / 800 实体一块），Flecs 4.2 不分块，Unity 另有 128 上限。Flecs 用 1 块拿到 70–90% 的便宜，EntJoy 的 131 块是这条对齐线的结果。容量调到 65536 会让 10 万×2 从 10.56 降到 7.84（中位），但会离开对齐线，只作为分离"块数"变量的实验臂。
+- C# 组 chunk 形式 Arch 与 EntJoy 差 1.5%、块数差 5%（100/125 对 105/131），是块规模对齐的直接结果；Unity 与这两家差 6–7.8 倍块数，那 2.4 倍差距里含块数，不能整段归给实现。
 
 ## 1 千档不进对比
 
 1 千档测的是固定开销，不是遍历吞吐。
 
-- 空 body 对照（`--job-overhead`，3 进程）：1 千档 EntJoy C++ `job-empty-cpp` 0.4 µs 对 `chunk-job-cpp` 0.5 µs；10 万档同一对照是 1.0 µs 对 13.4 µs。1 千档里 80–100% 的时间是固定开销。
+- 空 body 对照（`--job-overhead`，共享探针，3 进程）：1 千档 EntJoy C++ `job-empty-cpp` 0.4 µs 对 `chunk-job-cpp` 0.5 µs；10 万档同一对照是 1.0 µs 对 13.4 µs。1 千档里 80–100% 的时间是固定开销。
 - 块数在 1 千档无影响：容量 65536（1 块）0.4–0.5 µs，默认（2 块）0.5 µs。
-- Flecs 1 千档 1 块 0.112 µs、EnTT `group-each` 0.387 µs，量级同样由各自的每次交付开销决定。
-- 合并表里 1 千档同一臂的 6 个进程-中位从 1.756 到 22.91（13 倍），是进程级波动；单进程内取多轮最小值则是 `foreach` C# 臂 1.8–2.0 µs（tiering 关闭）与 1.0–1.1 µs（默认 tiering），3 进程 × 15 轮。
+- 矩阵口径的量级：Flecs 1 块 0.115 / 0.157 µs（2 / 3 组件）、EntJoy C++ `IJobEntity` 0.613 / 0.880、`IJobChunk` 1.044 / 0.748、EnTT `group-each` 0.546 / 0.646。
+- 合并表里 1 千档单臂的 spread 最大 5.2（EntJoy C++ `IJobChunk.Run` ×2：min 0.477、max 2.477），托管 `foreach` 臂是 2.0（2.175–4.324），都是跨进程波动。同一臂在单进程内取多轮最小值就稳定：`foreach` C# 臂 1.8–2.0 µs（tiering 关闭）、1.0–1.1 µs（默认 tiering），3 进程 × 15 轮（`--ab-pair`）。
 
 结论：1 千档从框架对比里拿掉，只在 `--job-overhead` 里当固定开销探针；跨框架比较从 10 万档读。
 
@@ -243,14 +240,14 @@ C# 组内 Arch 拿创建、添加与销毁，EntJoy 只在移除上更快 9%；U
 
 先在语言组内看位置，再跨组读量级。`—` 表示该框架没有这种形式。
 
-C++ 组（10 万实体，绝对读数 min / 中位，µs）。块数决定位置，逐格对齐动作见"C++ 组（对齐后）"：
+C++ 组（10 万实体，矩阵口径，绝对读数 min / 中位，µs）。块数决定位置，逐格对齐动作见"C++ 组（10 万，矩阵口径）"：
 
 | 场景 | Flecs 1 块 | Flecs 131 块 | EntJoy 默认块 | EntJoy 2 块 | EnTT |
 | --- | --- | --- | --- | --- | --- |
-| 10 万 × 2 | 7.33 / 8.69 | 14.11 / 14.80 | 7.40 / 8.45（105 块） | 6.20 / 6.70 | 41.55 / 45.00 |
-| 10 万 × 3 | 11.50 / 13.52 | 21.72 / 25.37 | 12.40 / 13.35（131 块） | 11.70 / 12.75 | 58.75 / 63.97 |
+| 10 万 × 2 | 7.85 / 8.32 | 14.61 / 16.50 | 9.16 / 10.56（105 块） | 6.95 / 7.84 | 43.68 / 50.87 |
+| 10 万 × 3 | 12.68 / 14.43 | 23.59 / 27.07 | 15.64 / 20.93（131 块） | 13.00 / 14.28 | 69.42 / 72.23 |
 
-EntJoy 默认块数改用 Flecs 的编译档（clang 23.1.1 `-O2` SSE2）重编：10 万×2 为 10.00 / 10.90，10 万×3 为 16.30 / 17.20；同档下 2 块是 7.60 / 8.20 与 12.30 / 12.70。
+EntJoy 默认块数改用 Flecs 的编译档（clang 23.1.1 `-O2` SSE2）重编，在 `--ab-pair` 口径下：10 万×2 为 10.00 / 10.90，10 万×3 为 16.30 / 17.20；同档下 2 块是 7.60 / 8.20 与 12.30 / 12.70。这一行只看相对影响，不与上表混比。
 
 结构变更（C++ 组，ns/实体，10 万，`results/struct-vs-native-summary.csv`）：
 
@@ -261,14 +258,19 @@ EntJoy 默认块数改用 Flecs 的编译档（clang 23.1.1 `-O2` SSE2）重编�
 | 移除组件 | 44.01 | **19.78** |
 | 销毁实体 | **49.71** | 58.72 |
 
-C# 组（相对该组最快者，只列 10 万档；1 千档不进排序）：
+C# 组遍历（相对该组最快者，10 万，同一会话，1 千档不进排序）：
 
-| 场景 | Arch | EntJoy | Unity |
+| 场景 | Arch | EntJoy |
+| --- | --- | --- |
+| Query 10 万 × 2 | 3.56 | 1.00 |
+| Query 10 万 × 3 | 2.28 | 1.00 |
+| Chunk 10 万 × 2 | 1.00 | 1.02 |
+| Chunk 10 万 × 3 | 1.02 | 1.00 |
+
+结构变更（C# 组，同一会话，含 Unity）：
+
+| 操作 | Arch | EntJoy | Unity |
 | --- | --- | --- | --- |
-| Query 10 万 × 2 | 3.58 | 1.00 | 3.00 |
-| Query 10 万 × 3 | 2.40 | 1.00 | 2.32 |
-| Chunk 10 万 × 2 | 1.00 | 1.02 | 2.60 |
-| Chunk 10 万 × 3 | 1.00 | 1.07 | 1.87 |
 | 创建实体 10 万 | 1.00 | 1.48 | 8.16 |
 | 添加组件 10 万 | 1.00 | 1.19 | 3.23 |
 | 移除组件 10 万 | 1.10 | 1.00 | 2.55 |
@@ -276,10 +278,10 @@ C# 组（相对该组最快者，只列 10 万档；1 千档不进排序）：
 
 读法：
 
-- **C++ 组**：按各自出厂默认（Flecs 1 块、EntJoy 105/131 块），10 万×3 是 11.50–13.52 对 12.40–13.35，两者重叠；合并表里的 +46% 在本机同一构建的会话里是 +8%（min）到 −1%（中位）。块数是决定位置的变量：131 块对 131 块时 Flecs 21.72–25.37、EntJoy 12.40–13.35，顺序反转；把 EntJoy 的编译档也降到 Flecs 的 `-O2` SSE2 后仍是 0–7%，小于跨进程波动。EnTT 用官方 owned `group` 在 41.55–63.97，比 Flecs 1 块慢 5–6 倍。
+- **C++ 组**：出厂默认下 Flecs 领先（10 万×3 是 14.43 对 20.93，+45%），领先的量来自"10 万实体一张连续表"：Flecs 1 块换 131 表要 +88%，EntJoy 131 块降到 2 块能省 32%。两边各按能到的最少块数比（Flecs 1 块、EntJoy 2 块），10 万×3 是 14.43 对 14.28，打平；×2 是 8.32 对 7.84，EntJoy 快 6%。强制 131 块对 131 块时反过来，EntJoy 快 1.3–1.6 倍。
 - **1 千档**：不进排序。它量的是固定开销（EntJoy C++ 空 body 与满 body 在 1 千档同为 0.4–0.5 µs），详见"1 千档不进对比"。
-- **C# 组**：EntJoy 的 query 路径（31.12）领先 Arch 3.6 倍、Unity Burst 3 倍；chunk 形式三家挤在 30 附近，EntJoy 的 C# chunk（30.74）与 Arch（30.15）差 2%。这些读数来自 tiering 关闭的会话，换 JIT 配置会动（见"测量协议"）。
-- **同框架跨语言**：EntJoy 的 C++ 转译路径比自家托管 chunk 路径快 3–4 倍（10 万×2：7.40–8.45 对 30.82，跨会话，只读量级）。
+- **C# 组**：EntJoy 的 query 路径（35.48）领先 Arch 3.6 倍；chunk 形式 Arch 32.61 与 EntJoy 33.11 差 1.5%，块数也差 5%。这些读数来自 tiering 关闭的会话，换 JIT 配置会动（见"测量协议"）。
+- **同框架跨语言**：EntJoy 的 C++ 转译路径比自家托管 chunk 路径快 2–3 倍（10 万×3：15.64–20.93 对 58.90–63.54，同一会话的两侧，只读量级）。
 - **结构变更**：C++ 组 EnTT 拿添加、移除与创建，Flecs 拿销毁，量级差 1.2–4.3 倍；C# 组 Arch 拿创建、添加与销毁，EntJoy 拿移除。
 
-口径：Arch / EntJoy 的托管路径是 .NET JIT（合并表来自 `DOTNET_TieredCompilation=0` 的会话），EntJoy 的 C++ 路径是 ClangCL（clang 19.1.5，实际生效 `-O3` + AVX2），Flecs / EnTT 是 clang 23.1.1 `-O2` SSE2，Unity 是 IL2CPP + Burst。框架间的位置只从 10 万档读，1 千档只作固定开销探针。
+口径：Arch / EntJoy 的托管路径是 .NET JIT（`DOTNET_TieredCompilation=0`），EntJoy 的 C++ 路径是 ClangCL（clang 19.1.5，实际生效 `-O3` + AVX2），Flecs / EnTT 是 clang 23.1.1 `-O2` SSE2，Unity 是 IL2CPP + Burst。框架间的位置只从矩阵口径的 10 万档读，1 千档只作固定开销探针，Unity 的遍历行来自另一个会话、不参与相对值。

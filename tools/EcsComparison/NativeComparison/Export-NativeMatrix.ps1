@@ -18,15 +18,23 @@ param(
     [switch]$SkipDotnet
 )
 
-$ErrorActionPreference = 'Stop'
+# Continue, not Stop: the native runs write their loader proof to stderr and
+# Windows PowerShell promotes that to a terminating error. Every native call is
+# checked through $LASTEXITCODE below, same as Run-TraversalMatrix.ps1.
+$ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 New-Item -ItemType Directory -Force -Path results | Out-Null
 
+# Managed arms run with tiering off, same as Run-TraversalMatrix.ps1. Left at the
+# default, the same CSV mixes two JIT configurations and the 100k x2 foreach arm
+# moves by 1.9x between them.
+$env:DOTNET_TieredCompilation = '0'
+
 $tag = "$Compiler-o$OptNumber"
 $nativeExe = Join-Path $root "native-comparison-$tag.exe"
 $outCsv = "results\native-vs-dotnet-$tag-summary.csv"
-$dotnetExe = Join-Path $root 'bin\Release\net8.0\EcsComparison.exe'
+$dotnetExe = Join-Path $root '..\bin\Release\net8.0\EcsComparison.exe'
 $dotnetOutDir = Join-Path $root '..\results'
 
 function Get-ToolPaths {
