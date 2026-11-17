@@ -87,18 +87,29 @@ static void print_result(
 
 // Flecs 的原生遍历形态是 table 级：iter + 组件指针 + count，没有逐实体回调 API。
 // 组件 id 由 ECS_COMPONENT 宏在调用点声明，宏不能放进 if constexpr，故按组件数拆薄包装。
+//
+// 块粒度：4.2.0 的 table 列是一整块连续分配（src/storage/table.c 的列初始化为
+// ecs_column_t 向量，无 4096 字节切块），查询按 table 交付，iter.count = table 实体数，
+// 公开 API 里没有块尺寸参数。块粒度实验只能从存储侧做：用 N 个 tag 把实体均分到 N 个
+// table，每个 table 各自分配 A/B/C 列，与分块存储同形。g_flecsTables=1 是默认单 table。
+static int g_flecsTables = 1;
+
 static void run_flecs_chunk_impl(int round, int entities, int components, ecs_world_t* world,
     ecs_entity_t idA, ecs_entity_t idB, ecs_entity_t idC)
 {
     A a{0};
     B b{1};
     C c{2};
+    std::vector<ecs_entity_t> tags;
+    for (int t = 0; t < g_flecsTables; ++t) tags.push_back(ecs_new(world));
     for (int i = 0; i < entities; ++i)
     {
         ecs_entity_t entity = ecs_new(world);
         ecs_set_id(world, entity, idA, sizeof(A), &a);
         ecs_set_id(world, entity, idB, sizeof(B), &b);
         if (components == 3) ecs_set_id(world, entity, idC, sizeof(C), &c);
+        if (g_flecsTables > 1)
+            ecs_add_id(world, entity, tags[static_cast<size_t>(i) * g_flecsTables / entities]);
     }
 
     ecs_query_desc_t desc = {};
@@ -168,8 +179,11 @@ static void run_flecs_chunk_impl(int round, int entities, int components, ecs_wo
         return;
     }
 
+    char api[64] = "iter-span";
+    if (g_flecsTables > 1) std::snprintf(api, sizeof api, "iter-span-t%d", g_flecsTables);
+
     Timing timing = measure(walk);
-    print_result(round, "Flecs", "Chunk", "iter-span", "Cpp", "Compiler", entities, components,
+    print_result(round, "Flecs", "Chunk", api, "Cpp", "Compiler", entities, components,
         chunks, timing);
 
     ecs_query_fini(query);
@@ -453,13 +467,18 @@ int main(int argc, char** argv)
             entitiesList[0] = std::atoi(argv[i] + 11);
             entitiesList[1] = 0;
         }
+        else if (std::strncmp(argv[i], "--flecs-tables=", 15) == 0)
+        {
+            g_flecsTables = std::atoi(argv[i] + 15);
+            if (g_flecsTables < 1) g_flecsTables = 1;
+        }
     }
 
     std::printf("MATRIX_ENV framework=native compiler=%s compiler_version=%s opt=-O%d "
                 "language_std=%ld rounds=%d warmup=%d samples=%d repetitions=%d flecs=4.2.0 "
-                "entt=4.0.0\n",
+                "entt=4.0.0 flecs_tables=%d\n",
         ENTJOY_COMPILER_NAME, ENTJOY_COMPILER_VERSION, ENTJOY_OPT_NUMBER,
-        static_cast<long>(__cplusplus), rounds, kWarmup, kSamples, kRepetitions);
+        static_cast<long>(__cplusplus), rounds, kWarmup, kSamples, kRepetitions, g_flecsTables);
 
     for (int round = 0; round < rounds; ++round)
     {

@@ -60,6 +60,9 @@ else if (args.Length > 0 && args[0] == "--job-overhead")
                 ("job-empty-body", probe.EntJoyEmptyJobCSharp),
                 ("chunk-job", probe.EntJoyChunkJobCSharp),
                 ("chunk", probe.EntJoyChunk),
+                ("job-cpp", probe.EntJoyJobCpp),
+                ("job-empty-cpp", probe.EntJoyEmptyJobCpp),
+                ("chunk-job-cpp", probe.EntJoyChunkJobCpp),
             };
             foreach (var entry in entries)
             {
@@ -142,10 +145,12 @@ else if (args.Length > 0 && args[0] == "--ab-pair")
     int pairRounds = args.Length > 3 ? int.Parse(args[3]) : 15;
     // 可选容量覆盖：把 EntJoy 的块容量强行对齐到对照实现，用于分离「块数/容量」与「实现」两个因素。
     int pairCapacity = args.Length > 4 ? int.Parse(args[4]) : 0;
+    // 可选实体数：1 千档要配容量覆盖时也要能改档位。
+    int pairEntities = args.Length > 5 ? int.Parse(args[5]) : 100_000;
     EntJoy.ECS.Archetype.ChunkCapacityOverride = pairCapacity;
     foreach (int components in new[] { 2, 3 })
     {
-        var probe = new SystemComparison { Components = components, EntityCount = 100_000 };
+        var probe = new SystemComparison { Components = components, EntityCount = pairEntities };
         try
         {
             probe.Setup();
@@ -155,6 +160,8 @@ else if (args.Length > 0 && args[0] == "--ab-pair")
                 ("chunk", probe.EntJoyChunk),
                 ("job", probe.EntJoyJobCSharp),
                 ("chunk-job", probe.EntJoyChunkJobCSharp),
+                ("job-cpp", probe.EntJoyJobCpp),
+                ("chunk-job-cpp", probe.EntJoyChunkJobCpp),
                 ("query-movenext", probe.EntJoyMoveNextOnly),
                 ("query-read1", probe.EntJoyRead1Only),
                 ("query-shared", probe.EntJoyShared),
@@ -208,7 +215,7 @@ else if (args.Length > 0 && args[0] == "--ab-pair")
             ratios.Sort();
             int faster = 0;
             foreach (double r in ratios) if (r < 1) faster++;
-            Console.WriteLine($"ABPAIR_SUM components={components} a={pairA} b={pairB} n={ratios.Count} median_ratio={ratios[ratios.Count / 2]:F4} faster={faster} a_min_us={minA:F1} b_min_us={minB:F1} min_ratio={minA / minB:F4}");
+            Console.WriteLine($"ABPAIR_SUM components={components} a={pairA} b={pairB} n={ratios.Count} median_ratio={ratios[ratios.Count / 2]:F4} faster={faster} a_min_us={minA:F1} b_min_us={minB:F1} min_ratio={minA / minB:F4} entities={pairEntities} capacity={pairCapacity} chunks={probe.ChunkCount()} arch_chunks={probe.ArchChunkCount()}");
 
             static double MeasureArm(Action run)
             {
