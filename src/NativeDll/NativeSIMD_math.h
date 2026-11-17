@@ -1,4 +1,4 @@
-// NativeSIMD_math.h — SIMD vector math (inline AVX2 + per-lane scalar fallbacks)
+// NativeSIMD_math.h 闁?SIMD vector math (inline AVX2 + per-lane scalar fallbacks)
 // Precision level controlled by -DSIMD_MATH_PRECISION=1|2|3
 //   1 = Fastest (~3.5 ULP, game physics/animation quality)
 //   2 = High   (~1.0 ULP)
@@ -19,14 +19,14 @@
 // Inline AVX2 polynomial implementations (SLEEF coefficients, zero call overhead)
 // Other platforms fall through to per-lane scalar fallbacks below.
 // ================================================================
-// Constants from sleef/src/libm/sleefsimdsp.c: PI_A2/PI_B2/PI_C2 = π/2 in 3-parts
+// Constants from sleef/src/libm/sleefsimdsp.c: PI_A2/PI_B2/PI_C2 = 閿?2 in 3-parts
 #define _N_PIO2_A 1.57079637e+00f
 #define _N_PIO2_B -4.37113883e-08f
 
 #if defined(NSIMD_AVX2) || defined(NSIMD_AVX512)
 
-// AVX2 内核在 AVX512 编译单元里也要可用：全部用显式 __m256 类型与本地 helper，
-// 不依赖 __m256 别名（它在 AVX512 TU 里是 __m512）。
+// AVX2 闁告劕鎳忛悧鎶藉捶?AVX512 缂傚倹鐗為惁褔宕￠弴鐐插笚闂佹彃濂旂弧鍐啺娴ｇ璁查柣銏╃厜缁变即宕楅妸鈺佸姤闁活潿鍔嶅Ο澶婎嚕?__m256 缂侇偉顕ч悗閿嬬▔鎼淬垺鎷遍柛?helper闁?
+// 濞戞挸绉崇欢椋庢導?__m256 闁告帩鍋勯幃鏇㈡晬閸繄鏆婇柛?AVX512 TU 闂佹彃鏈Σ?__m512闁挎稑顦埀?
 static N_FORCEINLINE __m256 _n256_abs(__m256 a) { return _mm256_andnot_ps(_mm256_set1_ps(-0.0f), a); }
 static N_FORCEINLINE __m256 _n256_round(__m256 a) { return _mm256_round_ps(a, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC); }
 static N_FORCEINLINE __m256 _n256_trunc(__m256 a) { return _mm256_round_ps(a, _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC); }
@@ -37,8 +37,8 @@ static N_FORCEINLINE __m256 _n256_ne(__m256 a, __m256 b) { return _mm256_cmp_ps(
 static N_FORCEINLINE __m256 _n256_not(__m256 m) { return _mm256_xor_ps(m, _mm256_castsi256_ps(_mm256_set1_epi32(-1))); }
 
 
-// 8 lane 的 π/2 归约：用 double 算 q 与 r，避免 float 常数在大 |x| 下的乘积误差。
-// 返回 |r| <= π/4 的 float 余数，象限 q 由 qOut 带出（q = round(x*2/π)）。
+// 8 lane 闁?閿?2 鐟滅増甯炵€规娊鏁嶅杈ㄦ殢 double 缂?q 濞?r闁挎稑鐭傛导鈺呭礂?float 閻㈩垰鎲￠弳鐔煎捶閵娿儯浜?|x| 濞戞挸顑囧▓鎴炵▕濡す婵堟嫚椤栨碍鈻曢柕?
+// 閺夆晜鏌ㄥú?|r| <= 閿?4 闁?float 濞达絾鐟﹂弳鐔兼晬瀹€鍐澖闂?q 闁?qOut 閻㈩垽绠戦崵顓㈡晬閸?= round(x*2/閿?闁挎稑顦埀?
 static N_FORCEINLINE __m256 _n_reduce_pio2_avx2(__m256 d, __m256i* qOut) {
   __m256d lo = _mm256_cvtps_pd(_mm256_castps256_ps128(d));
   __m256d hi = _mm256_cvtps_pd(_mm256_extractf128_ps(d, 1));
@@ -67,7 +67,7 @@ static N_FORCEINLINE __m256 _n_reduce_pio2_avx2(__m256 d, __m256i* qOut) {
   return _mm256_insertf128_ps(_mm256_castps128_ps256(rf_lo), rf_hi, 1);
 }
 
-// sin(r) / cos(r)，|r| <= π/4
+// sin(r) / cos(r)闁挎稑鐦漴| <= 閿?4
 static N_FORCEINLINE __m256 _n_sin_poly_avx2(__m256 r) {
   __m256 s = _mm256_mul_ps(r, r);
   __m256 p = _mm256_set1_ps(2.6083159809786593541503e-06f);
@@ -87,7 +87,7 @@ static N_FORCEINLINE __m256 _n_cos_poly_avx2(__m256 r) {
 }
 
 static N_FORCEINLINE __m256 _n_sin_avx2(__m256 d) {
-  // sin(x) = ±sin(r) / ±cos(r)：q 偶数取 sin，奇数取 cos；q&2 决定符号。
+  // sin(x) = 閸楊槞in(r) / 閸楊槈os(r)闁挎稒顒?闁稿鍩栭弳鐔煎矗?sin闁挎稑鑻〃宀勫极閺夊灝绲?cos闁挎稒纭?2 闁告劕鍟块悾鍓х箔閿曗偓瑜板潡濡?
   __m256i qi;
   __m256 r = _n_reduce_pio2_avx2(d, &qi);
   __m256 u_sin = _n_sin_poly_avx2(r);
@@ -97,7 +97,7 @@ static N_FORCEINLINE __m256 _n_sin_avx2(__m256 d) {
   __m256 u = _mm256_blendv_ps(u_cos, u_sin, even);
   __m256i flip = _mm256_and_si256(qi, _mm256_set1_epi32(2));
   __m256 rl = _mm256_xor_ps(u, _mm256_castsi256_ps(_mm256_slli_epi32(flip, 30)));
-  // |x| > 1e7 时 double 三段归约的余数已不可靠，交给 libm 精确归约（罕见路径）。
+  // |x| > 1e7 闁?double 濞戞挸顦伴宀冦亹閹烘柨顔婇柣銊ュ缂嶆垿寮弶鍨殥濞戞挸绉磋ぐ鏌ユ閻欏懐绀夊ù婧垮€楃划?libm 缂侇喖澧介垾妯裤亹閹烘柨顔婇柨娑樼墢缂嶅秶鎲存担鐣岀唴鐎垫澘瀚哥槐姘跺Υ?
   __m256 big = _mm256_cmp_ps(_mm256_and_ps(d, _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff))),
                               _mm256_set1_ps(1.0e7f), _CMP_GT_OQ);
   if (_mm256_movemask_ps(big) != 0)
@@ -113,7 +113,7 @@ static N_FORCEINLINE __m256 _n_sin_avx2(__m256 d) {
 }
 
 static N_FORCEINLINE __m256 _n_cos_avx2(__m256 d) {
-  // cos(x) = ±cos(r) / ±sin(r)：q 偶数取 cos，奇数取 sin；(q+1)&2 决定符号。
+  // cos(x) = 閸楊槈os(r) / 閸楊槞in(r)闁挎稒顒?闁稿鍩栭弳鐔煎矗?cos闁挎稑鑻〃宀勫极閺夊灝绲?sin闁?q+1)&2 闁告劕鍟块悾鍓х箔閿曗偓瑜板潡濡?
   __m256i qi;
   __m256 r = _n_reduce_pio2_avx2(d, &qi);
   __m256 u_sin = _n_sin_poly_avx2(r);
@@ -137,11 +137,11 @@ static N_FORCEINLINE __m256 _n_cos_avx2(__m256 d) {
   return rl;
 }
 static N_FORCEINLINE __m256 _n_log_avx2(__m256 d) {
-  // |x - 1| <= 0.25：直接展开 log(1+t)，避免尾数与指数拼接在近 1 处丢绝对精度
+  // |x - 1| <= 0.25闁挎稒姘ㄥú鍧楀箳閵夈儳娼旂€殿喒鍋?log(1+t)闁挎稑鐭傛导鈺呭礂瀹ュ懐鍟查柡渚€顣︾粭宀勫箰閸ャ劍娈堕柟宄板悑鐢挳宕烽妸銊х 1 濠㈣泛瀚☉顏嗙磼濠靛棭鍤犵紒顔藉劤鐎?
   __m256 t = _mm256_sub_ps(d, _mm256_set1_ps(1.0f));
   __m256 at = _mm256_and_ps(t, _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));
 
-  // log(1+t) = t*(1 - t/2 + t^2/3 - ... + t^12/13)；到 t^13 项，|t| <= 0.25 时截断误差 < 3e-9
+  // log(1+t) = t*(1 - t/2 + t^2/3 - ... + t^12/13)闁挎稒绋戦崺?t^13 濡炪倗娅㈢槐娼€t| <= 0.25 闁哄啳鍩栭崺鍛村棘椤撯槅鍤栫€?< 3e-9
   __m256 s = _mm256_set1_ps(1.0f / 13.0f);
   s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(-1.0f / 12.0f));
   s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(1.0f / 11.0f));
@@ -157,7 +157,7 @@ static N_FORCEINLINE __m256 _n_log_avx2(__m256 d) {
   s = _mm256_fmadd_ps(s, t, _mm256_set1_ps(1.0f));
   __m256 near = _mm256_mul_ps(t, s);
 
-  // 其余范围：尾数归约到 [1,2) + 两段 ln2 拼接
+  // 闁稿繑婀圭紞鎴︽嚑閸愩劍绾柨娑欒壘閻旑剟寮弶璺ㄧШ缂佹拝绠戦崺?[1,2) + 濞戞挶鍊栭?ln2 闁瑰嘲鍚嬬敮?
   __m256 dpos = _mm256_and_ps(d, _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));
   __m256i emm0 = _mm256_srli_epi32(_mm256_castps_si256(dpos), 23);
   __m256i e = _mm256_sub_epi32(emm0, _mm256_set1_epi32(127));
@@ -167,7 +167,7 @@ static N_FORCEINLINE __m256 _n_log_avx2(__m256 d) {
   __m256 x = _mm256_div_ps(_mm256_sub_ps(m, _mm256_set1_ps(1.0f)),
                             _mm256_add_ps(m, _mm256_set1_ps(1.0f)));
   __m256 x2 = _mm256_mul_ps(x, x);
-  // log(m) = x*(2 + 2x^2/3 + 2x^4/5 + ... + 2x^12/13)，7 项使 m -> 2 处的截断误差降到 1e-8
+  // log(m) = x*(2 + 2x^2/3 + 2x^4/5 + ... + 2x^12/13)闁? 濡炪倝鈧稑鈻?m -> 2 濠㈣泛瀚▓鎴﹀箣椤忓懏鐒介悹鍥跺灠濡﹪姊藉鍛厒 1e-8
   __m256 p = _mm256_set1_ps(0.15384615384615385f);      // 2/13
   p = _mm256_fmadd_ps(p, x2, _mm256_set1_ps(0.18181818181818182f));   // 2/11
   p = _mm256_fmadd_ps(p, x2, _mm256_set1_ps(0.2222222222222222f));    // 2/9
@@ -183,8 +183,8 @@ static N_FORCEINLINE __m256 _n_log_avx2(__m256 d) {
   return _mm256_blendv_ps(wide, near, _mm256_cmp_ps(at, _mm256_set1_ps(0.25f), _CMP_LE_OQ));
 }
 static N_FORCEINLINE __m256 _n_exp_avx2(__m256 d) {
-  // exp(d) = 2^n * exp(r)，n = round(d/ln2)，r = d - n*ln2（两段 ln2 抵消减法误差）。
-  // |r| <= ln2/2 ≈ 0.3466，7 次 Taylor 的截断误差 r^8/40320 ≈ 2.4e-9，低于 float 的半个 ulp。
+  // exp(d) = 2^n * exp(r)闁挎稑顔?= round(d/ln2)闁挎稑顔?= d - n*ln2闁挎稑鐗呯悮鍗炩枔?ln2 闁硅泛鐏氱粔鐑藉礄韫囨梻銆婇悹鍥跺灠濡﹪鏁嶆径鍫氬亾?
+  // |r| <= ln2/2 闁?0.3466闁? 婵?Taylor 闁汇劌瀚崺鍛村棘椤撯槅鍤栫€?r^8/40320 闁?2.4e-9闁挎稑濂旂紞鍡樼?float 闁汇劌瀚畷鎰▔?ulp闁?
   __m256 n = _n256_round(_mm256_mul_ps(d, _mm256_set1_ps(1.4426950408889634f)));   // 1/ln2
   __m256 r = _mm256_fnmadd_ps(n, _mm256_set1_ps(0.693145751953125f), d);          // d - n*ln2_hi
   r = _mm256_fnmadd_ps(n, _mm256_set1_ps(1.428606765330187045e-6f), r);            //   - n*ln2_lo
@@ -196,9 +196,9 @@ static N_FORCEINLINE __m256 _n_exp_avx2(__m256 d) {
   p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0f / 6.0f));
   p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(0.5f));
   p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0f));
-  p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0f));                                // exp(r) ≈ 1 + r*(1 + r*(…))
+  p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0f));                                // exp(r) 闁?1 + r*(1 + r*(闁?)
 
-  // 2^n 拆成两段指数域拼接，使 n < -126 的次正规结果仍按指数衰减（单段拼接会丢低位指数）。
+  // 2^n 闁瑰嘲妫欓崹姘▔閵堝棭鍞介柟绋挎处閺嗙喖宕洪悢绋款伝闁规亽鍎荤槐婵囨媴?n < -126 闁汇劌瀚鐓庮潰閿濆牜娼愮紓浣规尰閻忓绂掑鍡楃樆闁圭娲﹂弳鐔烘偘閺夊灝娅ら柨娑樼墕瀹曠喎鈻撻崹顐㈩伝闁规亽鍎扮槐鐗堢▔椤厾绉靛ù锝呯У鐎垫岸寮敮顔剧闁?
   __m256i ni = _mm256_cvtps_epi32(_mm256_max_ps(_mm256_min_ps(n, _mm256_set1_ps(127.0f)),
                                                _mm256_set1_ps(-252.0f)));
   __m256i n1 = _mm256_max_epi32(ni, _mm256_set1_epi32(-126));
@@ -208,7 +208,7 @@ static N_FORCEINLINE __m256 _n_exp_avx2(__m256 d) {
 
   __m256 result = _mm256_mul_ps(_mm256_mul_ps(p, s1), s2);
 
-  // 与 expf 的边界一致：上溢为 +inf，下溢为 0；NaN 输入保持 NaN。
+  // 濞?expf 闁汇劌瀚粩鐔兼偩鐏炶偐顏遍柤鐤彧缁辩増绋夋繝鍐劉濞?+inf闁挎稑濂旂粭鍛攦椤叀绀?0闁挎稒閽N 閺夊牊鎸搁崣鍡樼┍濠靛洤鐦?NaN闁?
   result = _mm256_blendv_ps(result, _mm256_set1_ps(INFINITY),
                             _mm256_cmp_ps(d, _mm256_set1_ps(88.722839f), _CMP_GE_OQ));
   result = _mm256_blendv_ps(result, _mm256_setzero_ps(),
@@ -216,8 +216,8 @@ static N_FORCEINLINE __m256 _n_exp_avx2(__m256 d) {
   return result;
 }
 
-// ---- SLEEF 路线的高精度 pow：log2 与 exp2 都在 double 里算，float 只做最后折回 ----
-// log2(m)，m ∈ [1,2)：不需要指数位提取，指数由调用方在 float 域带进来
+// ---- SLEEF 閻犱警鍨抽崵搴ㄦ儍閸曨垳褰紒顔藉劤鐎?pow闁挎稒顒g2 濞?exp2 闂侇喛妫勫﹢?double 闂佹彃鐬奸悾濠氭晬鐎规潝oat 闁告瑯浜滄禒娑㈠嫉閳ь剟宕ユ惔銏狀潙闁?----
+// log2(m)闁挎稑顔?闁?[1,2)闁挎稒鐭粭澶愭閳ь剛鎲版担鐟扮樄闁轰線顣︾紞鍛村箵閹邦剙绲块柨娑樻湰鐎垫岸寮幍顔芥殸閻犲鍟伴弫銈夊棘閻熺増韬?float 闁糕晝鍠庨悽顐ｆ交濞戞瑦闄?
 static N_FORCEINLINE __m256d _n_log2_mant_pd(__m256d m) {
   __m256d t = _mm256_div_pd(_mm256_sub_pd(m, _mm256_set1_pd(1.0)), _mm256_add_pd(m, _mm256_set1_pd(1.0)));
   __m256d z = _mm256_mul_pd(t, t);
@@ -235,12 +235,31 @@ static N_FORCEINLINE __m256d _n_log_mant_pd(__m256d m) {
   return _mm256_mul_pd(_n_log2_mant_pd(m), _mm256_set1_pd(0.69314718055994530942));
 }
 
+
+// log(1+t) 鐨勭骇鏁板洜瀛愶紙13 椤癸級锛寍t| <= 0.25 鏃舵埅鏂宸?< 1e-16
+static N_FORCEINLINE __m256d _n_log1p_series_pd(__m256d t) {
+  __m256d s = _mm256_set1_pd(1.0 / 13.0);
+  s = _mm256_fmadd_pd(s, t, _mm256_set1_pd(-1.0 / 12.0));
+  s = _mm256_fmadd_pd(s, t, _mm256_set1_pd(1.0 / 11.0));
+  s = _mm256_fmadd_pd(s, t, _mm256_set1_pd(-1.0 / 10.0));
+  s = _mm256_fmadd_pd(s, t, _mm256_set1_pd(1.0 / 9.0));
+  s = _mm256_fmadd_pd(s, t, _mm256_set1_pd(-1.0 / 8.0));
+  s = _mm256_fmadd_pd(s, t, _mm256_set1_pd(1.0 / 7.0));
+  s = _mm256_fmadd_pd(s, t, _mm256_set1_pd(-1.0 / 6.0));
+  s = _mm256_fmadd_pd(s, t, _mm256_set1_pd(1.0 / 5.0));
+  s = _mm256_fmadd_pd(s, t, _mm256_set1_pd(-1.0 / 4.0));
+  s = _mm256_fmadd_pd(s, t, _mm256_set1_pd(1.0 / 3.0));
+  s = _mm256_fmadd_pd(s, t, _mm256_set1_pd(-1.0 / 2.0));
+  s = _mm256_fmadd_pd(s, t, _mm256_set1_pd(1.0));
+  return s;
+}
+
 static N_FORCEINLINE __m256d _n_exp2_pd(__m256d v) {
   __m256d n = _mm256_round_pd(v, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
   __m256d f = _mm256_sub_pd(v, n);
   __m256d r = _mm256_mul_pd(f, _mm256_set1_pd(0.69314718055994530942));  // f*ln2
 
-  // exp(r)，|r| <= 0.347：12 次 Taylor，截断误差 < 1e-17
+  // exp(r)闁挎稑鐦漴| <= 0.347闁?2 婵?Taylor闁挎稑鏈崺鍛村棘椤撯槅鍤栫€?< 1e-17
   __m256d p = _mm256_set1_pd(1.0 / 479001600.0);
   p = _mm256_fmadd_pd(p, r, _mm256_set1_pd(1.0 / 39916800.0));
   p = _mm256_fmadd_pd(p, r, _mm256_set1_pd(1.0 / 3628800.0));
@@ -255,7 +274,7 @@ static N_FORCEINLINE __m256d _n_exp2_pd(__m256d v) {
   p = _mm256_fmadd_pd(p, r, _mm256_set1_pd(1.0));
   p = _mm256_fmadd_pd(p, r, _mm256_set1_pd(1.0));
 
-  // 2^n：int32 夹到 [-1022, 1023] 后转 int64 拼指数位
+  // 2^n闁挎稒顒t32 濠㈠墎鎳撻崺?[-1022, 1023] 闁告艾姘﹀ù?int64 闁瑰嘲鍚嬬€垫岸寮０浣虹Т
   __m128i ni32 = _mm256_cvtpd_epi32(_mm256_max_pd(_mm256_min_pd(n, _mm256_set1_pd(1023.0)),
                                                   _mm256_set1_pd(-1022.0)));
   __m256i ni64 = _mm256_cvtepi32_epi64(ni32);
@@ -266,7 +285,7 @@ static N_FORCEINLINE __m256 _n_pow_avx2_ps(__m256 x, __m256 y) {
   __m256d yl = _mm256_cvtps_pd(_mm256_castps256_ps128(y));
   __m256d yh = _mm256_cvtps_pd(_mm256_extractf128_ps(y, 1));
 
-  // 指数与尾数在 float 域取好，log2 只对尾数 [1,2) 展开
+  // 闁圭娲﹂弳鐔哥▔鎼达紕鍟查柡浣规緲濠€?float 闁糕晝鍠庤ぐ鍥ㄧ附閺傘倗绀塴og2 闁告瑯浜滈顔句焊閻愵剚娈?[1,2) 閻忕偞娲栫槐?
   __m256 ax = _n256_abs(x);
   __m256i ei = _mm256_sub_epi32(_mm256_srli_epi32(_mm256_castps_si256(ax), 23), _mm256_set1_epi32(127));
   __m256 mf = _mm256_castsi256_ps(_mm256_or_si256(_mm256_and_si256(_mm256_castps_si256(x), _mm256_set1_epi32(0x807fffff)),
@@ -281,7 +300,7 @@ static N_FORCEINLINE __m256 _n_pow_avx2_ps(__m256 x, __m256 y) {
   __m128 rhi = _mm256_cvtpd_ps(_n_exp2_pd(vh));
   __m256 mag = _mm256_insertf128_ps(_mm256_castps128_ps256(rlo), rhi, 1);
 
-  // 负底数：仅整数指数成立，奇数指数取负；非整数指数为 NaN
+  // 閻犳劗鍠庣花鎶藉极鐢喚绐楀ù鐘叉噺閺嗭綁寮悧鍫濈樄闁轰胶澧楅崹姘辩博鐎ｅ墎绀夊┑鍌氭处閺嗙喖骞愰崶銊︽闁告瑦鐗炵粈瀣晬濞戙垺濮滈柡浣哥摠閺嗙喖骞愰崶銊︽濞?NaN
   __m256 ay = _n256_abs(y);
   __m256 yInt = _mm256_and_ps(_n256_eq(y, _n256_trunc(y)), _n256_lt(ay, _mm256_set1_ps(8388608.0f)));
   __m256 half = _n256_trunc(_mm256_mul_ps(y, _mm256_set1_ps(0.5f)));
@@ -302,11 +321,11 @@ static N_FORCEINLINE __m256 _n_pow_avx2_ps(__m256 x, __m256 y) {
                      _mm256_or_ps(_n256_ne(x, x), _n256_ne(y, y)));
 }
 // ================================================================
-// High 档：double 中间精度实现（AVX2，目标 <=1 ULP float）
-// 8 个 float lane 拆成两组 4 lane double，算完折回。
+// High 婵℃缍囩槐鐧瞣uble 濞戞搩鍙冨Λ璺ㄥ垝閹冾唺閻庡湱鍋熼獮鍥晬閸︽彜X2闁挎稑鐬煎ú浼村冀?<=1 ULP float闁?
+// 8 濞?float lane 闁瑰嘲妫欓崹姘▔閵堝洨鐭?4 lane double闁挎稑鐬奸悾鑽も偓鐟版湰婵矂宕堕悙顏佸亾?
 // ================================================================
 static N_FORCEINLINE void _n_reduce4_pd(__m256d x, __m256d* rOut, __m128i* qOut) {
-  // 三段 π/2 归约：|r| <= π/4；q = round(x*2/π)
+  // 濞戞挸顦伴?閿?2 鐟滅増甯炵€规娊鏁嶅▓鈧瑀| <= 閿?4闁挎稒纭?= round(x*2/閿?
   const __m256d two_over_pi = _mm256_set1_pd(0.63661977236758134307553505349006);
   __m256d q = _mm256_round_pd(_mm256_mul_pd(x, two_over_pi), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
   __m256d r = _mm256_fnmadd_pd(q, _mm256_set1_pd(1.57079632673412561417e+00), x);
@@ -317,7 +336,7 @@ static N_FORCEINLINE void _n_reduce4_pd(__m256d x, __m256d* rOut, __m128i* qOut)
 }
 
 static N_FORCEINLINE __m256d _n_sin_poly4_pd(__m256d r) {
-  // sin(r) = r + r^3*(c1 + c2 z + ...)，z = r^2，|r| <= π/4
+  // sin(r) = r + r^3*(c1 + c2 z + ...)闁挎稑鐦?= r^2闁挎稑鐦漴| <= 閿?4
   __m256d z = _mm256_mul_pd(r, r);
   __m256d p = _mm256_set1_pd(-2.50521083854417187751e-8);            // c5 = -1/39916800
   p = _mm256_fmadd_pd(p, z, _mm256_set1_pd(2.75573192239858925109e-6));   // c4 = 1/362880
@@ -335,9 +354,9 @@ static N_FORCEINLINE __m256d _n_cos_poly4_pd(__m256d r) {
   return _mm256_fmadd_pd(p, z, _mm256_set1_pd(1.0));
 }
 
-// q mod 4，用于选择函数与符号
+// q mod 4闁挎稑鐬奸弫銈嗙鎼淬劉鍋撴径瀣仴闁告垼濮ら弳鐔哥▔鎼达綆鍎婇柛?
 static N_FORCEINLINE __m256d _n_quad4_pd(__m128i q) {
-  // q mod 4，落在 [0,3]（负 q 用 floor 除法，保证结果非负）
+  // q mod 4闁挎稑鐭侀幆銈夊捶?[0,3]闁挎稑鐗愮粈?q 闁?floor 闂傚嫨鍊栫涵鍫曟晬鐏炶偐绠介悹鍥﹁兌缁劑寮稿鍫熷閻犳劗鍣︾槐?
   __m256d qd = _mm256_cvtepi32_pd(q);
   __m256d q4 = _mm256_floor_pd(_mm256_mul_pd(qd, _mm256_set1_pd(0.25)));
   return _mm256_sub_pd(qd, _mm256_mul_pd(q4, _mm256_set1_pd(4.0)));
@@ -366,7 +385,7 @@ static N_FORCEINLINE __m256d _n_cos4_pd(__m256d x) {
                               _mm256_cmp_pd(m4, _mm256_set1_pd(3.0), _CMP_LT_OQ));
   return _mm256_blendv_pd(u, _mm256_sub_pd(_mm256_set1_pd(0.0), u), neg);
 }static N_FORCEINLINE __m256d _n_atan4_pd(__m256d x) {
-  // |x| <= tan(pi/8) 用奇多项式；|x| > 1 先取倒数；中间区间用 (x-1)/(x+1) 折到 pi/4 邻域
+  // |x| <= tan(pi/8) 闁活潿鍔岄〃灞惧緞濮樿翰鈧秴顕ｈ箛銉у耿|x| > 1 闁稿繐鐗嗚ぐ鍥磹閹烘挻娈堕柨娑欑◥閼垫垿姊婚弶鎴濋殬闂傚倸顕弫?(x-1)/(x+1) 闁硅埖锚閸?pi/4 闂侇叀顕ч悡?
   __m256d absMask = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7fffffffffffffffLL));
   __m256d ax = _mm256_and_pd(x, absMask);
   const __m256d t8 = _mm256_set1_pd(0.41421356237309503);
@@ -392,7 +411,7 @@ static N_FORCEINLINE __m256d _n_cos4_pd(__m256d x) {
   q = _mm256_fmadd_pd(q, z, _mm256_set1_pd(0.19999999262220255));
   q = _mm256_fmadd_pd(q, z, _mm256_set1_pd(-0.33333333329431702));
   __m256d r = _mm256_fmadd_pd(_mm256_mul_pd(u, z), q, u);
-  r = _mm256_add_pd(r, _mm256_and_pd(mid, pi_4));                       // 中间区间补 pi/4
+  r = _mm256_add_pd(r, _mm256_and_pd(mid, pi_4));                       // 濞戞搩鍙冨Λ鍧楀礌濞差亝锛熼悶?pi/4
   r = _mm256_blendv_pd(r, _mm256_sub_pd(pi_2, r), big);                 // |x|>1: pi/2 - atan(1/x)
   return _mm256_blendv_pd(_mm256_sub_pd(_mm256_set1_pd(0.0), r), r,
                           _mm256_cmp_pd(x, _mm256_set1_pd(0.0), _CMP_GT_OQ));
@@ -409,7 +428,7 @@ static N_FORCEINLINE __m256d _n_atan2_4_pd(__m256d y, __m256d x) {
 }
 
 static N_FORCEINLINE __m256d _n_exp4_pd(__m256d x) {
-  // 复用 pow 路径里的 exp2：exp(x) = 2^(x/ln2)
+  // 濠㈣泛绉堕弫?pow 閻犱警鍨扮欢鐐烘煂瀹€鈧▓?exp2闁挎稒鐡眡p(x) = 2^(x/ln2)
   return _n_exp2_pd(_mm256_mul_pd(x, _mm256_set1_pd(1.4426950408889634)));
 }
 
@@ -450,7 +469,7 @@ static N_FORCEINLINE __m256d _n_tanh4_pd(__m256d x) {
   return _mm256_div_pd(_mm256_sub_pd(e2, _mm256_set1_pd(1.0)), _mm256_add_pd(e2, _mm256_set1_pd(1.0)));
 }
 
-// ---- High 档对外入口：8 个 float lane 拆两组 double 计算后折回 ----
+// ---- High 婵℃绲介顔藉緞閺嵮冨汲闁告瑱缍囩槐? 濞?float lane 闁瑰嘲妫旂悮杈╃磼?double 閻犱緤绱曢悾濠氬触鎼淬垹顫戦柛?----
 static N_FORCEINLINE __m256 _n_high_map(__m256 x, __m256d (*f)(__m256d)) {
   __m128 lo = _mm256_cvtpd_ps(f(_mm256_cvtps_pd(_mm256_castps256_ps128(x))));
   __m128 hi = _mm256_cvtpd_ps(f(_mm256_cvtps_pd(_mm256_extractf128_ps(x, 1))));
@@ -469,16 +488,31 @@ static N_FORCEINLINE __m256 _n_high_tanh(__m256 x) { return _n_high_map(x, _n_ta
 static N_FORCEINLINE __m256 _n_high_exp(__m256 x)  { return _n_high_map(x, _n_exp4_pd); }
 
 static N_FORCEINLINE __m256 _n_high_log(__m256 x) {
-  // 指数与尾数在 float 域取出（精确），log(m) 在 double 算
+  // 鏉?1 濞堥潧宕熼悪顒冭泲 log1p閿涙碍瀵氶弫?鐏忕偓鏆熼幏鍏煎复閸?x閳? 婢跺嫪绱伴張澶屼绩闂呯偓鈧呮祲濞?
+  __m256d xd_lo = _mm256_cvtps_pd(_mm256_castps256_ps128(x));
+  __m256d xd_hi = _mm256_cvtps_pd(_mm256_extractf128_ps(x, 1));
+  __m256d tlo = _mm256_sub_pd(xd_lo, _mm256_set1_pd(1.0));
+  __m256d thi = _mm256_sub_pd(xd_hi, _mm256_set1_pd(1.0));
+
   __m256 ax = _mm256_and_ps(x, _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));
   __m256i ei = _mm256_sub_epi32(_mm256_srli_epi32(_mm256_castps_si256(ax), 23), _mm256_set1_epi32(127));
   __m256 mf = _mm256_castsi256_ps(_mm256_or_si256(_mm256_and_si256(_mm256_castps_si256(x), _mm256_set1_epi32(0x807fffff)),
-                                                   _mm256_set1_epi32(0x3f800000)));
+                                                                             _mm256_set1_epi32(0x3f800000)));
   const __m256d ln2 = _mm256_set1_pd(0.69314718055994530942);
   __m256d lo = _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(_mm256_castsi256_si128(ei)), ln2),
                              _n_log_mant_pd(_mm256_cvtps_pd(_mm256_castps256_ps128(mf))));
   __m256d hi = _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(_mm256_extracti128_si256(ei, 1)), ln2),
                              _n_log_mant_pd(_mm256_cvtps_pd(_mm256_extractf128_ps(mf, 1))));
+
+  // log(1+t) = t*(1 - t/2 + ... + t^12/13)閿涘瘝t| <= 0.25
+  __m256d nearLo = _mm256_mul_pd(tlo, _n_log1p_series_pd(tlo));
+  __m256d nearHi = _mm256_mul_pd(thi, _n_log1p_series_pd(thi));
+  __m256d absLo = _mm256_and_pd(tlo, _mm256_castsi256_pd(_mm256_set1_epi64x(0x7fffffffffffffffLL)));
+  __m256d absHi = _mm256_and_pd(thi, _mm256_castsi256_pd(_mm256_set1_epi64x(0x7fffffffffffffffLL)));
+  const __m256d q = _mm256_set1_pd(0.25);
+  lo = _mm256_blendv_pd(lo, nearLo, _mm256_cmp_pd(absLo, q, _CMP_LE_OQ));
+  hi = _mm256_blendv_pd(hi, nearHi, _mm256_cmp_pd(absHi, q, _CMP_LE_OQ));
+
   __m128 rl = _mm256_cvtpd_ps(lo), rh = _mm256_cvtpd_ps(hi);
   return _mm256_insertf128_ps(_mm256_castps128_ps256(rl), rh, 1);
 }
@@ -507,8 +541,8 @@ static N_FORCEINLINE void _n_high_sincos(__m256 x, __m256* s, __m256* c) {
 // ================================================================
 #if defined(NSIMD_AVX512)
 
-// AVX512 复用已验证的 AVX2 内核：16 lane 拆两组 8 lane。
-// 512 位只用于访存与算术组合，数学实现保持单份，避免两套代码精度分叉。
+// AVX512 濠㈣泛绉堕弫銈咁啅閺屻儳宕ｉ悹鍥﹁兌濞?AVX2 闁告劕鎳忛悧鎶芥晬?6 lane 闁瑰嘲妫旂悮杈╃磼?8 lane闁?
+// 512 濞达絽绉磋ぐ褔鎮介妸銈囪壘閻犱礁鐏濋悺銊︾▔鎼达絿鏆柡鍫灣缁秹宕ラ崼顒傜闁轰焦婢橀鐔衡偓鍦仧楠炲洦绌卞┑鍥х槷闁告娲戦崬銈夋晬瀹€鍕級闁稿繐绉崇悮杈ㄧ附濡炴儳鏁╅柣顔昏兌缁ㄦ寧鎯旈敃鈧崹搴ㄥ矗婢跺牃鍋?
 static N_FORCEINLINE n_float _n_sin_avx512(n_float d) {
   __m256 lo = _n_sin_avx2(_mm512_castps512_ps256(d));
   __m256 hi = _n_sin_avx2(_mm512_extractf32x8_ps(d, 1));
@@ -542,8 +576,8 @@ static N_FORCEINLINE n_float _n_pow_avx512(n_float x, n_float y) {
 
 
 // ================================================================
-// Precision selection: dispatch to inline → per-lane scalar
-// Only SIMD paths are defined here — the #ifndef guards at the bottom
+// Precision selection: dispatch to inline 闁?per-lane scalar
+// Only SIMD paths are defined here 闁?the #ifndef guards at the bottom
 // provide per-lane scalar fallbacks when no SIMD path is defined.
 // ================================================================
 
@@ -789,8 +823,8 @@ static N_FORCEINLINE n_float _n_tanh_neon(n_float a) {
 #define N_EXP(a)     _n_exp_neon(a)
 #define N_LOG10(a)   vmulq_f32(N_LOG(a), vdupq_n_f32(0.4342944819032518f))
   #endif
-  // 组合函数复用上面的基础实现（定义在下方，宏在使用处展开，顺序无影响）：
-  // tan/asin/acos/atan/atan2/pow 建立在 sin/cos/exp/log 之上，精度随之继承。
+  // 缂備礁瀚幃搴ㄥ礄閼恒儲娈跺璺虹Ф閺併倖绋夋繝鍥ㄦ〃闁汇劌瀚悢鈧痪顓涘亾閻庡湱鍋熼獮鍥晬閸繄鏆板☉鏂款槸濠€顏呯▔鐎ｎ偅鐓欓柨娑樿嫰閻ｎ垶宕烽妸銈呪枏闁活潿鍔岄ˇ鈺冧沪閺囩偟纾婚柨娑樼焸閵嗗孩鎯旇箛鏃€锟ョ憸鏉垮船閹肩兘鏁嶆径娑氱獥
+  // tan/asin/acos/atan/atan2/pow 鐎点倛娅ｉ悵娑㈠捶?sin/cos/exp/log 濞戞柨顑勭粭鍌炴晬瀹€鈧花鎸庢償閿曞倹顓瑰☉鏂款儑閹寸兘骞嶇憗銈傚亾?
 #if defined(NSIMD_AVX2) && !defined(NSIMD_AVX512)
     #define N_TAN(a)       _n_tan_ps(a)
     #define N_ASIN(a)      _n_asin_ps(a)
@@ -815,13 +849,13 @@ static N_FORCEINLINE n_float _n_tanh_neon(n_float a) {
 #endif
     #define N_SINCOS(a,s,c) _n_sincos_ps(a, s, c)
   #endif
-  // 非 AVX2 平台：Sleef 已移除，由下方 #ifndef N_* 守卫的逐通道标量回退覆盖。
+  // 闂?AVX2 妤犵偛鍟胯ぐ鎾晬濮濆獥eef 鐎规瓕灏欎簺闂傚嫨鍊х槐婵嬫偨閸欐鐟撻柡?#ifndef N_* 閻庣懓鐗嗗畷濂告儍閸曨垪鍋撻幇鎵冲亾濮樻湹澹曢柡宥呮喘閸ｆ椽宕堕悙琛″亾閳ь剛鎲伴崱娆愮０闁?
   // Non-AVX2: #ifndef guards below provide per-lane scalar fallback
-  // AVX512 暂缺 exp 内联实现，同样走标量回退。
+  // AVX512 闁哄棗鍊诲?exp 闁告劕鎳撴禒鍫⑩偓鍦仧楠炲洭鏁嶇仦鑺ュ€遍柡宥囨焿閾斿寮介崶顒€娅ら柛銉у仱閳ь兘鍋撻柕?
 
 // ===== High (~1.0 ULP) =====
 #elif SIMD_MATH_PRECISION == 2
-  // double 中间精度实现（AVX2）；其它平台由 #ifndef 守卫回退到逐 lane libm
+  // double 濞戞搩鍙冨Λ璺ㄥ垝閹冾唺閻庡湱鍋熼獮鍥晬閸︽彜X2闁挎稑顧€缁遍亶宕楃捄铏规殜妤犵偛鍟胯ぐ鎾偨?#ifndef 閻庣懓鐗嗗畷濂稿炊閻愯　鍋撻埀顒勫礆娴肩补鍋?lane libm
   #if defined(NSIMD_AVX2)
     #define N_SIN(a)       _n_high_sin(a)
     #define N_COS(a)       _n_high_cos(a)
@@ -1001,7 +1035,7 @@ static N_FORCEINLINE n_float _n_pow_fallback(n_float a, n_float b) {
 
 // ================================================================
 // Public API: n_sin_ps / n_cos_ps / ... (defined as macros to eliminate function call
-// boundary entirely — matches ISPC LLVM IR pattern where sin/cos/sqrt polynomials
+// boundary entirely 闁?matches ISPC LLVM IR pattern where sin/cos/sqrt polynomials
 // are direct intrinsics in the main basic block, with no call/ret overhead)
 // These work with n_float (__m256 / __m128 / float32x4_t / float)
 // ================================================================
@@ -1022,9 +1056,9 @@ static N_FORCEINLINE n_float _n_pow_fallback(n_float a, n_float b) {
 #define n_pow_ps(a,b)   N_POW(a,b)
 #define n_sincos_ps(a,s,c) N_SINCOS(a,s,c)
 // ================================================================
-// 标量路径的数学入口：与向量体共用同一套实现
-// 生成代码的标量段（尾部元素、未向量化的 job）调用 EJ_*，由本 TU 的
-// SIMD_MATH_PRECISION 决定用内联多项式还是 libm，避免同一 job 内两套精度。
+// 闁哄秴娲崳铏规崉椤栨氨绐為柣銊ュ閺嗙喓鈧冻绠戦崣鍡涘矗閿濆繒绐楀☉鎾抽閹粓鏌岃箛搴ｇЪ闁稿繗浜弫銈夊触鐏炶偐顏卞┑鍌涱殔閻ゅ嫰鎮?
+// 闁汇垻鍠愰崹姘閿濆洨鍨抽柣銊ュ閻栵綁鏌岃箛鏃戝斀闁挎稑鐗嗛悢顒勬焾閵娿儱甯楃紒杈╁О閳ь兛鐒﹀﹢顓㈠触閹达箑娅ら柛鏍ㄧ墱濞?job闁挎稑顦抽惃鐔兼偨?EJ_*闁挎稑鐬奸弫閬嶅嫉?TU 闁?
+// SIMD_MATH_PRECISION 闁告劕鍟块悾楣冩偨閵娿儱鏁堕柤杈ㄦ煥椤︽寧銇勯悷鎵閺夆晜蓱濡?libm闁挎稑鐭傛导鈺呭礂瀹ュ懏鍊卞☉鎾亾 job 闁告劕鎳嶇悮杈ㄧ附濡ゅ啰缈遍幖杈捐礋閳?
 // ================================================================
 #if SIMD_MATH_PRECISION == 3
   #define EJ_SINF(a)    ::sinf(a)
@@ -1063,9 +1097,9 @@ static N_FORCEINLINE n_float _n_pow_fallback(n_float a, n_float b) {
   #define EJ_POWF(a,b)  _n_lane0_f(n_pow_ps(n_set1_ps(a), n_set1_ps(b)))
 #endif
 // ================================================================
-#if defined(NSIMD_AVX2) && !defined(NSIMD_AVX512)   // 组合实现用 mask 做 blend，AVX512 的 mask 类型不兼容
-// Cross-platform inline math (via n_xxx_ps abstraction — all platforms)
-// These work on AVX2, SSE4, NEON — n_xxx_ps maps to the right intrinsic.
+#if defined(NSIMD_AVX2) && !defined(NSIMD_AVX512)   // 缂備礁瀚幃搴ｂ偓鍦仧楠炲洭鎮?mask 闁?blend闁挎稑鐡慥X512 闁?mask 缂侇偉顕ч悗閿嬬▔瀹ュ懎鎮戦悗?
+// Cross-platform inline math (via n_xxx_ps abstraction 闁?all platforms)
+// These work on AVX2, SSE4, NEON 闁?n_xxx_ps maps to the right intrinsic.
 // ================================================================
 
 static N_FORCEINLINE n_float _n_tan_ps(n_float a) {
@@ -1075,7 +1109,7 @@ static N_FORCEINLINE n_float _n_tan_ps(n_float a) {
 static N_FORCEINLINE n_float _n_atan_ps(n_float a);
 
 static N_FORCEINLINE n_float _n_atan2_ps(n_float y, n_float x) {
-  // x = 0 由 y/x = ±inf 经 atan 的 |x|>1 分支自然得到 ±pi/2；只需补 atan2(0,0) = 0。
+  // x = 0 闁?y/x = 閸楊槒nf 缂?atan 闁?|x|>1 闁告帒妫欓弫顕€鎳涢鍡楀Ё鐎电増顨呴崺?閸楊槚i/2闁挎稒绋戣ぐ褔妫侀埀顒傛偘?atan2(0,0) = 0闁?
   n_float zero = n_set1_ps(0.0f), pi = n_set1_ps(3.1415926535897932f);
   n_float r = _n_atan_ps(n_div_ps(y, x));
   n_float adj = n_blendv_ps(n_sub_ps(zero, pi), pi, n_cmp_ge_ps(y, zero));
@@ -1083,20 +1117,20 @@ static N_FORCEINLINE n_float _n_atan2_ps(n_float y, n_float x) {
   return n_blendv_ps(r, zero, n_and_mask(n_cmp_eq_ps(x, zero), n_cmp_eq_ps(y, zero)));
 }
 static N_FORCEINLINE n_float _n_asin_ps(n_float a) {
-  // asin(x) = 2*atan2(x, 1 + sqrt(1 - x^2))；1 - x^2 用 (1-x)(1+x) 计算，|x| -> 1 处不丢精度
+  // asin(x) = 2*atan2(x, 1 + sqrt(1 - x^2))闁? - x^2 闁?(1-x)(1+x) 閻犱緤绱曢悾濠氭晬鐎靛彻| -> 1 濠㈣泛瀚粭澶嬬▔閵忋垻缈遍幖?
   n_float one = n_set1_ps(1.0f);
   n_float t = n_sqrt_ps(n_max_ps(n_mul_ps(n_sub_ps(one, a), n_add_ps(one, a)), n_set1_ps(0.0f)));
   return n_mul_ps(n_set1_ps(2.0f), _n_atan2_ps(a, n_add_ps(one, t)));
 }
 static N_FORCEINLINE n_float _n_acos_ps(n_float a) {
-  // acos(x) = 2*atan2(sqrt(1 - x^2), 1 + x)；x = -1 时两项都为 0，单独补 pi
+  // acos(x) = 2*atan2(sqrt(1 - x^2), 1 + x)闁挎稒纭?= -1 闁哄啯婀圭悮杈ㄣ亜瑜版帒鍘村☉?0闁挎稑鑻畷鐔兼偑椤掑叝?pi
   n_float one = n_set1_ps(1.0f);
   n_float t = n_sqrt_ps(n_max_ps(n_mul_ps(n_sub_ps(one, a), n_add_ps(one, a)), n_set1_ps(0.0f)));
   n_float r = n_mul_ps(n_set1_ps(2.0f), _n_atan2_ps(t, n_add_ps(one, a)));
   return n_blendv_ps(r, n_set1_ps(3.1415926535897932f), n_cmp_le_ps(a, n_set1_ps(-1.0f)));
 }static N_FORCEINLINE n_float _n_atan_ps(n_float a) {
-  // atan(x) = x + x^3*q(x^2) 在 [0,1] 上的相对 minimax 拟合（max rel err 1.8e-8）；
-  // |x|>1 走 atan(x) = pi/2 - atan(1/x)。
+  // atan(x) = x + x^3*q(x^2) 闁?[0,1] 濞戞挸锕﹀▓鎴︽儎缁嬫鍤?minimax 闁归鍠庨幃搴ㄦ晬閸ь晣x rel err 1.8e-8闁挎稑顧€缁?
+  // |x|>1 閻?atan(x) = pi/2 - atan(1/x)闁?
   n_float one = n_set1_ps(1.0f), pi_2 = n_set1_ps(1.5707963267948966f);
   n_float ax = n_fabs_ps(a);
   n_float big = n_cmp_gt_ps(ax, one);
@@ -1115,7 +1149,7 @@ static N_FORCEINLINE n_float _n_acos_ps(n_float a) {
   return n_blendv_ps(n_sub_ps(n_set1_ps(0.0f), r), r, n_cmp_gt_ps(a, n_set1_ps(0.0f)));
 }
 static N_FORCEINLINE n_float _n_sinh_ps(n_float a) {
-  // 小 |x| 下 e^x - e^-x 有相消误差，改用 Taylor（到 x^7）；阈值 0.25 两侧误差同量级
+  // 閻?|x| 濞?e^x - e^-x 闁哄牆顦卞ù澶娾槈閸綆鍤栫€瑰壊鍣槐婵嬪绩閸︻厽鏆?Taylor闁挎稑鐗嗛崺?x^7闁挎稑顧€缁遍亶姊奸崼婵冨亾?0.25 濞戞挶鍊撻弲鍓佹嫚椤栨碍鈻曢柛姘焸閸ｈ櫣鐥?
   n_float e = n_exp_ps(a);
   n_float wide = n_mul_ps(n_set1_ps(0.5f), n_sub_ps(e, n_exp_ps(n_mul_ps(n_set1_ps(-1.0f), a))));
   n_float x2 = n_mul_ps(a, a);
@@ -1133,7 +1167,7 @@ static N_FORCEINLINE n_float _n_cosh_ps(n_float a) {
   n_float series = n_fmadd_ps(x2, s, n_set1_ps(1.0f));   // 1 + x^2/2 + x^4/24 + x^6/720
   return n_blendv_ps(wide, series, n_cmp_lt_ps(n_fabs_ps(a), n_set1_ps(0.25f)));
 }static N_FORCEINLINE n_float _n_tanh_ps(n_float a) {
-  // 小 |x| 下 e^2x - 1 相消，用 x - x^3/3 + 2x^5/15 - 17x^7/315 + 62x^9/2835
+  // 閻?|x| 濞?e^2x - 1 闁烩晛鎲＄粔鐑芥晬瀹€鈧弫?x - x^3/3 + 2x^5/15 - 17x^7/315 + 62x^9/2835
   n_float e2 = n_exp_ps(n_mul_ps(n_set1_ps(2.0f), a));
   n_float wide = n_div_ps(n_sub_ps(e2, n_set1_ps(1.0f)), n_add_ps(e2, n_set1_ps(1.0f)));
   n_float x2 = n_mul_ps(a, a);
@@ -1149,15 +1183,15 @@ static N_FORCEINLINE n_float _n_cosh_ps(n_float a) {
 }
 
 static N_FORCEINLINE n_float _n_pow_ps(n_float x, n_float y) {
-  // MathF.Pow 语义：正底数走 exp(y*log x)；负底数只在 y 为整数时成立，奇数指数取负；
-  // 底数为 0 由 log(0) = -inf 经 exp 自然落到 0 / +inf；非整数指数的负底数与 NaN 输入返回 NaN。
+  // MathF.Pow 閻犲浂鍘虹粻鐔兼晬濮橆収鍔€閹煎瓨娲橀弳鐔烘導?exp(y*log x)闁挎稒绋栫粈瀣償閺囩喐娈堕柛娆樹簻濠€?y 濞戞挾鍎ら弳锝夊极閻楀牊顦ч柟瀛樺姉閻濇盯鏁嶇仦绛嬫疄闁轰胶澧楃€垫岸寮弶鍨悼閻犳劗鍣︾槐?
+  // 閹煎瓨娲橀弳鐔哥▔?0 闁?log(0) = -inf 缂?exp 闁煎浜為崝褔鎷冮挊澶婄厒 0 / +inf闁挎稒鐩顏堝极鐎涙ɑ娈堕柟绋挎处閺嗙喖鎯冮崟顔绢槹閹煎瓨娲橀弳鐔哥▔?NaN 閺夊牊鎸搁崣鍡樻交閺傛寧绀€ NaN闁?
   n_float ax = n_fabs_ps(x);
   n_float mag = n_exp_ps(n_mul_ps(y, n_log_ps(ax)));
 
-  // y 是否为整数：y == trunc(y) 且 |y| < 2^23（float 在此范围内整数可精确表示）
+  // y 闁哄嫷鍨伴幆浣圭▔閻戞ɑ娈婚柡浣稿簻缁辩殧 == trunc(y) 濞?|y| < 2^23闁挎稑娼歭oat 闁革负鍔嶉婵嬫嚑閸愩劍绾柛鎰噺閺嗭綁寮弶鍨缂侇喖澧介垾妯兼偘閵娧佷粵闁?
   n_float ay = n_fabs_ps(y);
   n_mask yInt = n_and_mask(n_cmp_eq_ps(y, n_trunc_ps(y)), n_cmp_lt_ps(ay, n_set1_ps(8388608.0f)));
-  // 奇数判定：y/2 的截断乘 2 与 y 不等即为奇数
+  // 濠靛倸娲﹂弳鐔煎礆閵堝懐鏆伴柨娑欘劧/2 闁汇劌瀚崺鍛村棘椤撴繄顔?2 濞?y 濞戞挸绉堕悺鎴﹀础閸忓懓绀嬪┑鍌氭处閺?
   n_float half = n_trunc_ps(n_mul_ps(y, n_set1_ps(0.5f)));
   n_mask yOdd = n_cmp_ne_ps(n_mul_ps(half, n_set1_ps(2.0f)), y);
   n_mask negate = n_and_mask(yInt, yOdd);
@@ -1166,36 +1200,36 @@ static N_FORCEINLINE n_float _n_pow_ps(n_float x, n_float y) {
                              n_and_mask(n_cmp_lt_ps(x, n_set1_ps(0.0f)), negate));
   n_float result = n_mul_ps(mag, sign);
 
-  // 负底数 + 非整数指数 ⇒ NaN
+  // 閻犳劗鍠庣花鎶藉极?+ 闂傚牏鍋為弳锝夊极閻楀牆鐦归柡?闁?NaN
   result = n_blendv_ps(result, n_set1_ps(NAN),
                        n_and_mask(n_cmp_lt_ps(x, n_set1_ps(0.0f)), n_not_mask(yInt)));
-  // pow(x, 0) = 1（含 NaN 底数），与 MathF.Pow 一致
+  // pow(x, 0) = 1闁挎稑鐗嗛幆?NaN 閹煎瓨娲橀弳鐔兼晬婢舵稓绀夊☉?MathF.Pow 濞戞挴鍋撻柤?
   result = n_blendv_ps(result, n_set1_ps(1.0f), n_cmp_eq_ps(y, n_set1_ps(0.0f)));
-  // x = 0 且 y < 0 ⇒ +inf；x = 0 且 y > 0 ⇒ 0
+  // x = 0 濞?y < 0 闁?+inf闁挎稒纭?= 0 濞?y > 0 闁?0
   n_mask xZero = n_cmp_eq_ps(x, n_set1_ps(0.0f));
   result = n_blendv_ps(result, n_set1_ps(INFINITY),
                        n_and_mask(xZero, n_cmp_lt_ps(y, n_set1_ps(0.0f))));
   result = n_blendv_ps(result, n_set1_ps(0.0f),
                        n_and_mask(xZero, n_cmp_gt_ps(y, n_set1_ps(0.0f))));
-  // NaN 传播（底数或指数任一为 NaN ⇒ NaN，但 pow(NaN, 0) = 1 已在上方处理）
+  // NaN 濞磋偐濮甸幐閬嶆晬閸繄淇洪柡浣哄閸ㄣ劑骞愰崶銊︽濞寸姾顔婄粩瀛樼▔?NaN 闁?NaN闁挎稑濂旂徊?pow(NaN, 0) = 1 鐎瑰憡褰冨﹢顏呯▔婵犲啯鐓欏璺哄閹﹪鏁?
   result = n_blendv_ps(result, n_set1_ps(NAN),
                        n_or_mask(n_cmp_ne_ps(x, x), n_cmp_ne_ps(y, y)));
   return result;
 }
 
 // ================================================================
-#endif // 组合实现（AVX2 only）
+#endif // 缂備礁瀚幃搴ｂ偓鍦仧楠炲洭鏁嶉崷鎻2 only闁?
 // Double-precision SLEEF (n_*_pd)
 // ================================================================
 
-// Double precision sin — inline AVX2 polynomial (SLEEF-derived)
+// Double precision sin 闁?inline AVX2 polynomial (SLEEF-derived)
 #if defined(NSIMD_AVX2)
 // _PIO2 constants for double
 #define _N_PIO2_A_PD -1.5707963050
 #define _N_PIO2_B_PD -4.37113883e-8
 
 static N_FORCEINLINE n_double _n_sin_avx2_pd(n_double d) {
-    // Range reduction: q = round(d * 2/π), r = d - q * π/2
+    // Range reduction: q = round(d * 2/閿?, r = d - q * 閿?2
     n_double qf = _mm256_round_pd(_mm256_mul_pd(d, _mm256_set1_pd(0.6366197723675814)), 0);
     __m128i q_lo = _mm256_cvtpd_epi32(qf);  // q as int (lower 4 lanes)
     __m128i q_hi = _mm256_cvtpd_epi32(_mm256_permute2f128_pd(qf, qf, 1));
@@ -1213,7 +1247,7 @@ static N_FORCEINLINE n_double _n_sin_avx2_pd(n_double d) {
     n_double x = _mm256_blendv_pd(r,
         _mm256_sub_pd(_mm256_set1_pd(1.5707963267948966), r), _mm256_castps_pd(use_cos_mask));
 
-    // Polynomial: sin(x) ≈ x + x³·c1 + x⁵·c2 + x⁷·c3 + x⁹·c4
+    // Polynomial: sin(x) 闁?x + x妞翠浇鐭綾1 + x闁筹箑鐥夌粚? + x闁筹缚璞㈢粚? + x闁筹箑顒濈粚?
     n_double x2 = _mm256_mul_pd(x, x);
     n_double c = _mm256_set1_pd(-1.66666666666666324348e-01);   // c1
     c = _mm256_fmadd_pd(c, x2, _mm256_set1_pd(8.33333333332248946124e-03));  // c2
@@ -1230,7 +1264,7 @@ static N_FORCEINLINE n_double _n_sin_avx2_pd(n_double d) {
 #define N_COS_PD(a) _n_sin_avx2_pd(_mm256_add_pd(a, _mm256_set1_pd(1.5707963267948966)))
 
 #elif defined(NSIMD_AVX512)
-// AVX512 double sin/cos：逐 lane 标量（正确性优先，避免重写 8-wide 多项式）
+// AVX512 double sin/cos闁挎稒宀搁埀?lane 闁哄秴娲崳娲晬閸噥鍔€缁绢収鍠楅埀顑倻鍠橀柛蹇撶墳缁辨繈鏌嗛崹顔煎赋闂佹彃绉撮崯?8-wide 濠㈣埖宀搁妴宥咁嚕韫囥儳绀?
 static N_FORCEINLINE n_double _n_sin_pd_avx512(n_double a) {
     double lane[8]; int w = 8;
     n_store_pd(lane, a);
