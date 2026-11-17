@@ -183,7 +183,10 @@ dotnet run --project tools/AutoSIMDPerf/AutoSIMDPerf.csproj -c Release
 | AVX512 | 复用 AVX2 内核（16 lane 拆两组 8 lane），全函数；组合函数用 `__mmask16` + `mask_blend` | 复用 AVX2 的 `__m256` 实现，全函数 |
 | NEON (aarch64) | 双精度归约＋float 多项式，全函数（1–3 ULP） | double lane 实现，全函数（0–1 ULP） |
 | SSE4.1 | 双精度归约＋float 多项式，全函数（1–3 ULP；`pow` 走 libm） | 逐 lane libm |
-| 其它 | 逐 lane libm | 逐 lane libm |
+| AArch32 / 其它 | 逐 lane libm | 逐 lane libm |
+
+NEON 路径要求 aarch64：实现用到 `vdivq_f32` 与 `vrnd*q_f32` 等 ARMv8 指令，
+`NSIMD_NEON` 的判定只看 `__aarch64__` / `_M_ARM64`，AArch32 走标量路径。
 
 加速比（相对逐 lane libm，同进程交替 7 轮取中位，单位 ns/元素）：
 

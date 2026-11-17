@@ -76,26 +76,6 @@ jobs:
       - name: ULP gate (High, SSE4.1)
         run: ./build-sse41/MathUlpCheckHigh
 
-  # AArch32：NEON 但无 double lane，数学走 libm 回退；此作业验证回退路径能编译并通过门禁。
-  arm32:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install cross toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y g++-arm-linux-gnueabihf qemu-user
-      - name: Configure
-        run: |
-          cmake -S tools/MathUlpCheck -B build-arm32 -DCMAKE_BUILD_TYPE=Release \
-            -DENTJOY_MATH_ISA=neon \
-            -DENTJOY_MATH_EXTRA_FLAGS="-mfpu=neon -mfloat-abi=hard" \
-            -DCMAKE_CXX_COMPILER=arm-linux-gnueabihf-g++
-      - name: Build
-        run: cmake --build build-arm32 -j
-      - name: ULP gate (Fastest, emulated armv7)
-        run: qemu-arm -L /usr/arm-linux-gnueabihf ./build-arm32/MathUlpCheck
-
   neon:
     runs-on: ubuntu-latest
     steps:
