@@ -9,6 +9,9 @@ if(NOT DEFINED ENTJOY_NATIVE_DLL_DIR)
     set(ENTJOY_NATIVE_DLL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../src/NativeDll")
 endif()
 
+# 交叉编译时追加的编译选项（例如 armv7 的 -mfpu=neon -mfloat-abi=hard）
+set(ENTJOY_MATH_EXTRA_FLAGS "" CACHE STRING "额外编译选项")
+
 set(ENTJOY_MATH_ISA "avx2" CACHE STRING "目标指令集：avx2 | avx512 | neon")
 
 if(ENTJOY_MATH_ISA STREQUAL "avx512")
@@ -50,7 +53,7 @@ endif()
 function(entjoy_math_target name source precision)
     add_executable(${name} ${source})
     target_compile_definitions(${name} PRIVATE ${ENTJOY_SIMD_DEFS} SIMD_MATH_PRECISION=${precision} NDEBUG NOMINMAX)
-    target_compile_options(${name} PRIVATE ${ENTJOY_BASE_FLAGS} ${ENTJOY_SIMD_FLAGS})
+    target_compile_options(${name} PRIVATE ${ENTJOY_BASE_FLAGS} ${ENTJOY_SIMD_FLAGS} ${ENTJOY_MATH_EXTRA_FLAGS})
     target_include_directories(${name} PRIVATE "${ENTJOY_NATIVE_DLL_DIR}")
     if(NOT MSVC)
         target_link_options(${name} PRIVATE -no-pie)
