@@ -50,12 +50,14 @@ jobs:
         continue-on-error: true
         run: |
           set +e
-          ./$SDE_DIR/sde64 -skx -- "$PWD/build-avx512/MathUlpCheck"
+          sde="./${SDE_DIR}sde64"
+          "$sde" -skx -- "$PWD/build-avx512/MathUlpCheck"
       - name: ULP gate (High, AVX512, best effort)
         continue-on-error: true
         run: |
           set +e
-          ./$SDE_DIR/sde64 -skx -- "$PWD/build-avx512/MathUlpCheckHigh"
+          sde="./${SDE_DIR}sde64"
+          "$sde" -skx -- "$PWD/build-avx512/MathUlpCheckHigh"
 
   # NEON：交叉编译 ＋ qemu-user 运行。数学实现目前回退到 libm，因此这里验证的是
   # 交叉编译链路与回退路径的精确性；NEON 内联实现落地后同一门禁即可覆盖。
