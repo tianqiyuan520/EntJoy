@@ -86,6 +86,7 @@ namespace NativeTranspiler.Analyzer
             // 这里按 job 的 MathPrecision 覆盖（3 = IEEE，逐通道标量，与 C# 逐位一致）。
             sb.AppendLine($"#define SIMD_MATH_PRECISION {(int)simdMathPrecision + 1}");
             sb.AppendLine("#include \"NativeSIMD.h\"");
+        sb.AppendLine("#include \"NativeSIMD_math.h\"");
             sb.AppendLine("#include \"SimdValue.h\"");
             sb.AppendLine();
 

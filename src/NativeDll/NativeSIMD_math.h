@@ -816,6 +816,47 @@ static N_FORCEINLINE n_float _n_pow_fallback(n_float a, n_float b) {
 #define n_pow_ps(a,b)   N_POW(a,b)
 #define n_sincos_ps(a,s,c) N_SINCOS(a,s,c)
 // ================================================================
+// 标量路径的数学入口：与向量体共用同一套实现
+// 生成代码的标量段（尾部元素、未向量化的 job）调用 EJ_*，由本 TU 的
+// SIMD_MATH_PRECISION 决定用内联多项式还是 libm，避免同一 job 内两套精度。
+// ================================================================
+#if SIMD_MATH_PRECISION == 3
+  #define EJ_SINF(a)    ::sinf(a)
+  #define EJ_COSF(a)    ::cosf(a)
+  #define EJ_TANF(a)    ::tanf(a)
+  #define EJ_ASINF(a)   ::asinf(a)
+  #define EJ_ACOSF(a)   ::acosf(a)
+  #define EJ_ATANF(a)   ::atanf(a)
+  #define EJ_ATAN2F(a,b) ::atan2f(a, b)
+  #define EJ_SINHF(a)   ::sinhf(a)
+  #define EJ_COSHF(a)   ::coshf(a)
+  #define EJ_TANHF(a)   ::tanhf(a)
+  #define EJ_EXPF(a)    ::expf(a)
+  #define EJ_LOGF(a)    ::logf(a)
+  #define EJ_LOG10F(a)  ::log10f(a)
+  #define EJ_POWF(a,b)  ::powf(a, b)
+#else
+  static N_FORCEINLINE float _n_lane0_f(n_float v) {
+    alignas(32) float t[NSIMD_WIDTH];
+    n_store_ps(t, v);
+    return t[0];
+  }
+  #define EJ_SINF(a)    _n_lane0_f(n_sin_ps(n_set1_ps(a)))
+  #define EJ_COSF(a)    _n_lane0_f(n_cos_ps(n_set1_ps(a)))
+  #define EJ_TANF(a)    _n_lane0_f(n_tan_ps(n_set1_ps(a)))
+  #define EJ_ASINF(a)   _n_lane0_f(n_asin_ps(n_set1_ps(a)))
+  #define EJ_ACOSF(a)   _n_lane0_f(n_acos_ps(n_set1_ps(a)))
+  #define EJ_ATANF(a)   _n_lane0_f(n_atan_ps(n_set1_ps(a)))
+  #define EJ_ATAN2F(a,b) _n_lane0_f(n_atan2_ps(n_set1_ps(a), n_set1_ps(b)))
+  #define EJ_SINHF(a)   _n_lane0_f(n_sinh_ps(n_set1_ps(a)))
+  #define EJ_COSHF(a)   _n_lane0_f(n_cosh_ps(n_set1_ps(a)))
+  #define EJ_TANHF(a)   _n_lane0_f(n_tanh_ps(n_set1_ps(a)))
+  #define EJ_EXPF(a)    _n_lane0_f(n_exp_ps(n_set1_ps(a)))
+  #define EJ_LOGF(a)    _n_lane0_f(n_log_ps(n_set1_ps(a)))
+  #define EJ_LOG10F(a)  _n_lane0_f(n_log10_ps(n_set1_ps(a)))
+  #define EJ_POWF(a,b)  _n_lane0_f(n_pow_ps(n_set1_ps(a), n_set1_ps(b)))
+#endif
+// ================================================================
 // Cross-platform inline math (via n_xxx_ps abstraction — all platforms)
 // These work on AVX2, SSE4, NEON — n_xxx_ps maps to the right intrinsic.
 // ================================================================

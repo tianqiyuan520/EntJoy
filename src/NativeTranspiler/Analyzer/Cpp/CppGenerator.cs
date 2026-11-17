@@ -137,13 +137,12 @@ namespace NativeTranspiler.Analyzer
 
             var methodSyntax = SymbolHelper.GetMethodSyntax(method);
 
+            // EJ_* 标量数学入口定义在 NativeSIMD_math.h：所有 C++ TU 都要能解析
+            sb.AppendLine("#include \"NativeSIMD_math.h\"");
             if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
             {
-                sb.AppendLine("#include \"NativeSIMD.h\"");
                 sb.AppendLine("#include \"SimdValue.h\"");
             }
-            else
-                sb.AppendLine("#include <cmath>");
 
             sb.AppendLine();
             sb.AppendLine(GenerateCppFunctionSignature(method, fullyQualified: true));
