@@ -39,7 +39,7 @@ jobs:
         run: cmake --build build-avx512 -j
       - name: Fetch Intel SDE
         run: |
-          URL=https://downloadmirror.intel.com/813591/sde-external-9.33.0-2024-01-07-lin.tar.xz
+          URL=https://downloadmirror.intel.com/924984/sde-external-10.13.1-2026-07-28-lin.tar.xz
           curl -fsSL -o sde.tar.xz "$URL"
           tar xf sde.tar.xz
           echo "SDE_DIR=$(echo sde-external-*/)" >> $GITHUB_ENV
