@@ -603,9 +603,9 @@ static N_FORCEINLINE n_float _n_sin_neon(n_float d) {
   n_float r; n_int q;
   _n_reduce_neon(d, &r, &q);
   n_int odd = vandq_s32(q, vdupq_n_s32(1));
-  n_float u = vbslq_f32(vreinterpretq_u32_s32(vceqq_s32(odd, vdupq_n_s32(1))), _n_cos_poly_neon(r), _n_sin_poly_neon(r));
+  n_float u = vbslq_f32(vceqq_s32(odd, vdupq_n_s32(1)), _n_cos_poly_neon(r), _n_sin_poly_neon(r));
   n_int flip = vandq_s32(q, vdupq_n_s32(2));
-  n_float res = vbslq_f32(vreinterpretq_u32_s32(vceqq_s32(flip, vdupq_n_s32(2))), vnegq_f32(u), u);
+  n_float res = vbslq_f32(vceqq_s32(flip, vdupq_n_s32(2)), vnegq_f32(u), u);
   if (vmaxvq_f32(vabsq_f32(d)) > 1.0e7f) {
     float lane[NSIMD_WIDTH]; n_store_ps(lane, d);
     for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::sinf(lane[i]);
@@ -618,9 +618,9 @@ static N_FORCEINLINE n_float _n_cos_neon(n_float d) {
   n_float r; n_int q;
   _n_reduce_neon(d, &r, &q);
   n_int odd = vandq_s32(q, vdupq_n_s32(1));
-  n_float u = vbslq_f32(vreinterpretq_u32_s32(vceqq_s32(odd, vdupq_n_s32(1))), _n_sin_poly_neon(r), _n_cos_poly_neon(r));
+  n_float u = vbslq_f32(vceqq_s32(odd, vdupq_n_s32(1)), _n_sin_poly_neon(r), _n_cos_poly_neon(r));
   n_int flip = vandq_s32(vaddq_s32(q, vdupq_n_s32(1)), vdupq_n_s32(2));
-  n_float res = vbslq_f32(vreinterpretq_u32_s32(vceqq_s32(flip, vdupq_n_s32(2))), vnegq_f32(u), u);
+  n_float res = vbslq_f32(vceqq_s32(flip, vdupq_n_s32(2)), vnegq_f32(u), u);
   if (vmaxvq_f32(vabsq_f32(d)) > 1.0e7f) {
     float lane[NSIMD_WIDTH]; n_store_ps(lane, d);
     for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::cosf(lane[i]);
