@@ -181,8 +181,9 @@ dotnet run --project tools/AutoSIMDPerf/AutoSIMDPerf.csproj -c Release
 |---|---|---|
 | AVX2 | 内联多项式，全函数覆盖（1–3 ULP） | double 中间精度，全函数（0–1 ULP） |
 | AVX512 | 复用 AVX2 内核（16 lane 拆两组 8 lane），全函数；组合函数用 `__mmask16` + `mask_blend` | 复用 AVX2 的 `__m256` 实现，全函数 |
-| NEON (aarch64) | 双精度归约＋float 多项式，全函数（1–3 ULP） | 逐 lane libm |
-| SSE4 / 其它 | 逐 lane libm | 逐 lane libm |
+| NEON (aarch64) | 双精度归约＋float 多项式，全函数（1–3 ULP） | double lane 实现，全函数（0–1 ULP） |
+| SSE4.1 | 双精度归约＋float 多项式，全函数（1–3 ULP；`pow` 走 libm） | 逐 lane libm |
+| 其它 | 逐 lane libm | 逐 lane libm |
 
 AVX512 与 NEON 这两条线的实现没有运行验证的硬件条件：本机 CPU 不支持 AVX512，也没有 ARM 设备。NEON 目标可以用 clang 交叉编译做语法与类型检查，AVX512 同理。
 ### 跨平台数值门禁
