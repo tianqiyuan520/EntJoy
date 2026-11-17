@@ -69,6 +69,7 @@ dotnet run --project tools/NativeTranspilerFixture/NativeTranspilerFixture.cspro
 dotnet build samples/EntJoySample/EntJoySample.csproj -c Release -t:Rebuild
 dotnet run --project tools/AutoSIMDVerify/AutoSIMDVerify.csproj -c Release
 dotnet run --project tools/AutoSIMDEdgeCases/AutoSIMDEdgeCases.csproj -c Release
+dotnet run --project tools/AutoSIMDPerf/AutoSIMDPerf.csproj -c Release
 ```
 
 两个 `AutoSIMD*` 工具从仓库 `bin/` 拷贝 `Native*.dll` 到自己的输出目录；日志里 `fallback=none` 才说明跑的是原生产物。32 位脚本用 `-m32` 编译一个包含 `NativeGeneratedSupport.h` 的探针，必须被 `static_assert` 拦下。
@@ -103,6 +104,7 @@ dotnet run --project tools/NativeTranspilerFixture/NativeTranspilerFixture.cspro
 dotnet build samples/EntJoySample/EntJoySample.csproj -c Release -t:Rebuild
 dotnet run --project tools/AutoSIMDVerify/AutoSIMDVerify.csproj -c Release
 dotnet run --project tools/AutoSIMDEdgeCases/AutoSIMDEdgeCases.csproj -c Release
+dotnet run --project tools/AutoSIMDPerf/AutoSIMDPerf.csproj -c Release
 ```
 
 两个 `AutoSIMD*` 工具从仓库 `bin/` 拷贝 `Native*.dll` 到自己的输出目录；日志里 `fallback=none` 才说明跑的是原生产物。32 位脚本用 `-m32` 编译一个包含 `NativeGeneratedSupport.h` 的探针，必须被 `static_assert` 拦下。
@@ -153,3 +155,14 @@ dotnet run --project tools/AutoSIMDEdgeCases/AutoSIMDEdgeCases.csproj -c Release
 | pow | 1.00 | 2.71× |
 
 表中 0.00 表示该域内全部样本与正确舍入结果的位模式一致。非 AVX2 平台上 High 档回退到逐 lane libm（精确但无加速）。
+### 端到端加速
+
+`tools/AutoSIMDPerf` 用相同调度参数交替运行同一 job 的托管实现与 AutoSIMD 原生实现（1M 元素 × 9 轮取中位，托管基线同样走并行调度器）。三次独立运行的中位加速：
+
+| 用例 | 加速范围 | 最差相对误差 |
+|---|---|---|
+| ExpLog | 5.66–7.06× | 2.2e-7 |
+| Transcend（9 个超越函数） | 6.95–8.72× | 1.2e-6 |
+| HighPrecision | 7.45–8.63× | 3.6e-7 |
+
+读数随机器负载浮动，跨运行不可相减；同一轮内的托管/原生是两个配对样本。
