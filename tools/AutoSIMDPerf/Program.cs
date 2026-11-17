@@ -39,6 +39,9 @@ namespace AutoSIMDPerf
             Run("HighPrecision", input, outCs, outSimd,
                 () => new HighPrecision_CSharp_PF { Input = input, Result = outCs }.Schedule(N, 0).Complete(),
                 () => new HighPrecision_SIMD_PF { Input = input, Result = outSimd }.Schedule(N, 0).Complete());
+
+            RunSplit(input, outCs, outSimd);
+            RunBodies(input);
         }
 
         private static void Run(string name, NativeArray<float> input,
@@ -66,6 +69,116 @@ namespace AutoSIMDPerf
             Report(name, csNs, simdNs, outCs, outSimd);
         }
 
+        /// <summary>按 body 拆解：只改计算量，看 SIMD 收益随数学函数密度的变化。</summary>
+        private static void RunBodies(NativeArray<float> input)
+        {
+            using var o1 = new NativeArray<float>(N, Allocator.Persistent);
+            using var o2 = new NativeArray<float>(N, Allocator.Persistent);
+
+            Console.WriteLine();
+            Console.WriteLine("  body 拆解（原生标量 vs 原生 SIMD，同一输入）");
+
+            Body("arith (x*2.5+3)", input, o1, o2,
+                () => new BodyArith_Scalar_PF { Input = input, Result = o1 }.Schedule(N, 0).Complete(),
+                () => new BodyArith_SIMD_PF { Input = input, Result = o2 }.Schedule(N, 0).Complete());
+
+            Body("sin", input, o1, o2,
+                () => new BodySin_Scalar_PF { Input = input, Result = o1 }.Schedule(N, 0).Complete(),
+                () => new BodySin_SIMD_PF { Input = input, Result = o2 }.Schedule(N, 0).Complete());
+
+            Body("sin+cos", input, o1, o2,
+                () => new BodySinCos_Scalar_PF { Input = input, Result = o1 }.Schedule(N, 0).Complete(),
+                () => new BodySinCos_SIMD_PF { Input = input, Result = o2 }.Schedule(N, 0).Complete());
+
+            Body("sin+cos+log", input, o1, o2,
+                () => new BodySinCosLog_Scalar_PF { Input = input, Result = o1 }.Schedule(N, 0).Complete(),
+                () => new BodySinCosLog_SIMD_PF { Input = input, Result = o2 }.Schedule(N, 0).Complete());
+        }
+
+        private static unsafe void Body(string name, NativeArray<float> input,
+            NativeArray<float> outScalar, NativeArray<float> outSimd, Action scalar, Action simd)
+        {
+            scalar(); simd();
+
+            var scalarNs = new List<double>(Rounds);
+            var simdNs = new List<double>(Rounds);
+            for (int round = 0; round < Rounds; round++)
+            {
+                var sw = Stopwatch.StartNew();
+                scalar();
+                sw.Stop();
+                scalarNs.Add(sw.Elapsed.TotalNanoseconds / N);
+
+                sw.Restart();
+                simd();
+                sw.Stop();
+                simdNs.Add(sw.Elapsed.TotalNanoseconds / N);
+            }
+
+            scalarNs.Sort(); simdNs.Sort();
+            double s = scalarNs[Rounds / 2], v = simdNs[Rounds / 2];
+
+            float worstRel = 0;
+            for (int i = 0; i < outScalar.Length; i++)
+            {
+                float e = ((float*)outScalar.GetUnsafePtr())[i];
+                float a = ((float*)outSimd.GetUnsafePtr())[i];
+                float rel = MathF.Abs(a - e) / MathF.Max(1.0f, MathF.Abs(e));
+                if (rel > worstRel) worstRel = rel;
+            }
+
+            Console.WriteLine($"    {name,-18} 标量 {s,6:F2} ns   SIMD {v,6:F2} ns   加速 {s / v,5:F2}x   worstRel={worstRel:E1}");
+        }
+        /// <summary>三元分解：托管 / 原生标量 / 原生 SIMD，同一算式、同一调度参数。
+        /// 「原生标量」把托管开销剥离，剩下的比值才是纯 SIMD 收益。</summary>
+        private static unsafe void RunSplit(NativeArray<float> input, NativeArray<float> outCs, NativeArray<float> outSimd)
+        {
+            using var outScalar = new NativeArray<float>(N, Allocator.Persistent);
+            Action managed = () => new PerfSplit_CSharp_PF { Input = input, Result = outCs }.Schedule(N, 0).Complete();
+            Action scalar = () => new PerfSplit_Scalar_PF { Input = input, Result = outScalar }.Schedule(N, 0).Complete();
+            Action simd = () => new PerfSplit_SIMD_PF { Input = input, Result = outSimd }.Schedule(N, 0).Complete();
+
+            managed(); scalar(); simd();
+
+            var managedNs = new List<double>(Rounds);
+            var scalarNs = new List<double>(Rounds);
+            var simdNs = new List<double>(Rounds);
+            for (int round = 0; round < Rounds; round++)
+            {
+                var sw = Stopwatch.StartNew();
+                managed();
+                sw.Stop();
+                managedNs.Add(sw.Elapsed.TotalNanoseconds / N);
+
+                sw.Restart();
+                scalar();
+                sw.Stop();
+                scalarNs.Add(sw.Elapsed.TotalNanoseconds / N);
+
+                sw.Restart();
+                simd();
+                sw.Stop();
+                simdNs.Add(sw.Elapsed.TotalNanoseconds / N);
+            }
+
+            managedNs.Sort(); scalarNs.Sort(); simdNs.Sort();
+            double m = managedNs[Rounds / 2], s = scalarNs[Rounds / 2], v = simdNs[Rounds / 2];
+
+            float worstRel = 0;
+            for (int i = 0; i < outCs.Length; i++)
+            {
+                float e = ((float*)outCs.GetUnsafePtr())[i];
+                float a = ((float*)outSimd.GetUnsafePtr())[i];
+                float rel = MathF.Abs(a - e) / MathF.Max(1.0f, MathF.Abs(e));
+                if (rel > worstRel) worstRel = rel;
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("  三元分解（同一算式、同一线程配置）");
+            Console.WriteLine($"    托管        {m,7:F2} ns/元素");
+            Console.WriteLine($"    原生标量    {s,7:F2} ns/元素   托管 -> 原生 {m / s,5:F2}x");
+            Console.WriteLine($"    原生 SIMD   {v,7:F2} ns/元素   原生标量 -> SIMD {s / v,5:F2}x   总加速 {m / v,5:F2}x   worstRel={worstRel:E1}");
+        }
         private static unsafe void Report(string name, List<double> csNs, List<double> simdNs,
             NativeArray<float> outCs, NativeArray<float> outSimd)
         {
