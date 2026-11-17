@@ -74,3 +74,21 @@ dotnet run --project tools/AutoSIMDEdgeCases/AutoSIMDEdgeCases.csproj -c Release
 两个 `AutoSIMD*` 工具从仓库 `bin/` 拷贝 `Native*.dll` 到自己的输出目录；日志里 `fallback=none` 才说明跑的是原生产物。32 位脚本用 `-m32` 编译一个包含 `NativeGeneratedSupport.h` 的探针，必须被 `static_assert` 拦下。
 
 性能比较冻结两套完整产物，保持调度器二进制、输入、预热和测量帧数相同，交替运行多轮。单一负载的结果只说明该负载，不能作为所有 Job 都更快的结论。
+
+### Fastest 档的实测误差
+
+`NativeSIMD_math.h` 的 `SIMD_MATH_PRECISION == 1` 分支只有 `sin`/`cos`/`log` 三个函数是内联多项式，其余数学函数走逐 lane 标量回退。实测（AVX2、8 宽、`/fp:precise`，`tools/MathUlpCheck`）：
+
+| 函数 | 输入域 | absULP 最大 | absULP 均值 | relULP 最大 |
+|---|---|---|---|---|
+| sin | [-π, π] | 1.00 | 0.10 | 2.00 |
+| cos | [-π, π] | 1.00 | 0.11 | 2.00 |
+| sin | [0, 8π] | 12.06 | 2.59 | 11943 |
+| sin | [-100, 100] | 60.00 | 11.85 | 53848 |
+| sin | [-1000, 1000] | 508.00 | 107.37 | 370352 |
+| sin | [-10000, 10000] | 8185.50 | 1183.35 | 4511307 |
+| cos | [-10000, 10000] | 8174.63 | 1177.24 | 4333430 |
+| log | [1e-37, 1e38] | 128.00 | 16.57 | 8428 |
+| log | [0.999, 1.001] | 10.30 | 4.05 | 9606 |
+
+`absULP = |out - ref| / 2^-24`，`relULP = (|out - ref| / |ref|) / 2^-24`。sin/cos 的绝对误差随 `|x|` 线性增长：三次 π/2 归约在 float 下精度有限，`|x|` 越大残余误差越大。log 的相对误差在 75 个数量级上均值 0.55 ULP，接近 1 时由绝对误差主导。
