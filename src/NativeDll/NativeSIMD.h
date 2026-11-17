@@ -26,7 +26,8 @@
     #define NSIMD_SSE4 1
     #define NSIMD_WIDTH 4
     #include <smmintrin.h>
-#elif defined(__ARM_NEON) || defined(__aarch64__) || defined(_M_ARM64)
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    // NEON 实现用到 vdivq_f32 / vrnd*q_f32 等 ARMv8 指令，AArch32 走标量路径
     #define NSIMD_NEON 1
     #define NSIMD_WIDTH 4
     #include <arm_neon.h>
