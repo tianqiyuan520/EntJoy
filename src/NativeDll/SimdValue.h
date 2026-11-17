@@ -686,6 +686,8 @@ static inline simd_value<float> exp(simd_value<float> v)   { return simd_value<f
 static inline simd_value<float> log(simd_value<float> v)   { return simd_value<float>{ n_log_ps(v.v) }; }
 static inline simd_value<float> log10(simd_value<float> v) { return simd_value<float>{ n_log10_ps(v.v) }; }
 
-// SIMD int element-wise min/max (named to avoid Windows min/max macro conflict)
+// SIMD element-wise min/max (named to avoid Windows min/max macro conflict)
 static inline simd_value<int> simd_max(simd_value<int> a, simd_value<int> b) { return simd_value<int>{ n_max_epi32(a.v, b.v) }; }
 static inline simd_value<int> simd_min(simd_value<int> a, simd_value<int> b) { return simd_value<int>{ n_min_epi32(a.v, b.v) }; }
+static inline simd_value<float> simd_max(simd_value<float> a, simd_value<float> b) { return simd_value<float>{ n_max_ps(a.v, b.v) }; }
+static inline simd_value<float> simd_min(simd_value<float> a, simd_value<float> b) { return simd_value<float>{ n_min_ps(a.v, b.v) }; }

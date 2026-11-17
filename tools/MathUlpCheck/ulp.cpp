@@ -102,6 +102,42 @@ namespace
         cosStat.Report();
     }
 
+
+    void RunExp(const char* label, double lo, double hi, int samples)
+    {
+        Stat expStat{ "exp" };
+        alignas(32) float in[8], out[8];
+        for (int i = 0; i < samples; i += 8)
+        {
+            for (int k = 0; k < 8; k++)
+            {
+                double t = (double)(i + k) / (double)samples;
+                in[k] = (float)(lo + (hi - lo) * t);
+            }
+            _mm256_storeu_ps(out, _n_exp_avx2(_mm256_loadu_ps(in)));
+            for (int k = 0; k < 8; k++) expStat.Add(in[k], out[k], std::exp((double)in[k]));
+        }
+        std::printf("%s\n", label);
+        expStat.Report();
+    }
+
+    void RunLog10(const char* label, double loExp, double hiExp, int samples)
+    {
+        Stat log10Stat{ "log10" };
+        alignas(32) float in[8], out[8];
+        for (int i = 0; i < samples; i += 8)
+        {
+            for (int k = 0; k < 8; k++)
+            {
+                double t = (double)(i + k) / (double)samples;
+                in[k] = (float)std::pow(10.0, loExp + (hiExp - loExp) * t);
+            }
+            _mm256_storeu_ps(out, _mm256_mul_ps(_n_log_avx2(_mm256_loadu_ps(in)), _mm256_set1_ps(0.4342944819032518f)));
+            for (int k = 0; k < 8; k++) log10Stat.Add(in[k], out[k], std::log10((double)in[k]));
+        }
+        std::printf("%s\n", label);
+        log10Stat.Report();
+    }
     void RunLog(const char* label, double loExp, double hiExp, int samples, bool denseNearOne)
     {
         Stat logStat{ "log" };
@@ -141,5 +177,8 @@ int main()
 
     RunLog("log: [1e-37, 1e38]", -37.0, 38.0, 400000, false);
     RunLog("log: [0.999, 1.001]", 0, 0, 200000, true);
+    RunExp("exp: [-87, 88]", -87.0, 88.0, 400000);
+    RunExp("exp: [-1, 1]", -1.0, 1.0, 200000);
+    RunLog10("log10: [1e-37, 1e38]", -37.0, 38.0, 400000);
     return 0;
 }

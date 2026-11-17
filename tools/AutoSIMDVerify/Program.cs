@@ -180,6 +180,7 @@ namespace AutoSIMDVerify
             // ═══════════ 对抗性压力测试（嵌套×分支×循环×多变量）═══════════
             // ═══════════ pair 元素（uint2）═══════════
             RunPairCase(ref passed, ref failed);
+            RunExpLogCase(ref passed, ref failed);
             RunStress(passed: ref passed, failed: ref failed);
 
             Console.WriteLine($"\n{'=',-1}{"",-1} PASS {passed} / {passed + failed}");
@@ -223,6 +224,48 @@ namespace AutoSIMDVerify
                     Console.WriteLine($"  ❌ P14 Pair uint2 (mode={mode}) mismatches={errs}/{N}");
                     failed++;
                 }
+            }
+        }
+
+        /// <summary>exp/log10 走内联多项式：与 C# 基线做相对误差对照（Fastest 档不是逐位一致）。</summary>
+        private static unsafe void RunExpLogCase(ref int passed, ref int failed)
+        {
+            using var input = new NativeArray<float>(N, Allocator.Persistent);
+            using var expect = new NativeArray<float>(N, Allocator.Persistent);
+            using var actual = new NativeArray<float>(N, Allocator.Persistent);
+
+            // 覆盖 exp 的整段有效域与 log10 的输入范围；±1e-3 附近考察近 1 的 log10。
+            float[] seeds = { -87.0f, -40.0f, -10.0f, -1e-3f, 0.0f, 1e-3f, 1.0f, 5.0f, 20.0f, 60.0f, 88.0f };
+            for (int i = 0; i < N; i++) ((float*)input.GetUnsafePtr())[i] = seeds[i % seeds.Length];
+
+            var reference = new EntJoySample.AutoSIMDTest.ExpLog_CSharp_PF { Input = input, Result = expect };
+            for (int i = 0; i < N; i++) reference.Execute(i);
+            for (int i = 0; i < N; i++) ((float*)actual.GetUnsafePtr())[i] = float.NaN;
+
+            var job = new EntJoySample.AutoSIMDTest.ExpLog_SIMD_PF { Input = input, Result = actual };
+            job.Schedule(N, 0).Complete();
+
+            int errs = 0;
+            float worstRel = 0;
+            for (int i = 0; i < N; i++)
+            {
+                float e = ((float*)expect.GetUnsafePtr())[i];
+                float a = ((float*)actual.GetUnsafePtr())[i];
+                float scale = MathF.Max(1.0f, MathF.Abs(e));
+                float rel = MathF.Abs(a - e) / scale;
+                if (rel > worstRel) worstRel = rel;
+                if (float.IsNaN(a) || rel > 1e-5f) errs++;
+            }
+
+            if (errs == 0)
+            {
+                Console.WriteLine($"  ✅ P15 exp/log10 (worstRel={worstRel:E2})");
+                passed++;
+            }
+            else
+            {
+                Console.WriteLine($"  ❌ P15 exp/log10 mismatches={errs}/{N} worstRel={worstRel:E2}");
+                failed++;
             }
         }
 

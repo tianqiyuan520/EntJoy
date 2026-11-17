@@ -128,6 +128,40 @@ static N_FORCEINLINE n_float _n_log_avx2(n_float d) {
                         _mm256_mul_ps(x, t));
 }
 
+static N_FORCEINLINE n_float _n_exp_avx2(n_float d) {
+  // exp(d) = 2^n * exp(r)，n = round(d/ln2)，r = d - n*ln2（两段 ln2 抵消减法误差）。
+  // |r| <= ln2/2 ≈ 0.3466，7 次 Taylor 的截断误差 r^8/40320 ≈ 2.4e-9，低于 float 的半个 ulp。
+  n_float n = n_round_ps(_mm256_mul_ps(d, _mm256_set1_ps(1.4426950408889634f)));   // 1/ln2
+  n_float r = _mm256_fnmadd_ps(n, _mm256_set1_ps(0.693145751953125f), d);          // d - n*ln2_hi
+  r = _mm256_fnmadd_ps(n, _mm256_set1_ps(1.428606765330187045e-6f), r);            //   - n*ln2_lo
+
+  n_float p = _mm256_set1_ps(1.0f / 5040.0f);
+  p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0f / 720.0f));
+  p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0f / 120.0f));
+  p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0f / 24.0f));
+  p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0f / 6.0f));
+  p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(0.5f));
+  p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0f));
+  p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0f));                                // exp(r) ≈ 1 + r*(1 + r*(…))
+
+  // 2^n 拆成两段指数域拼接，使 n < -126 的次正规结果仍按指数衰减（单段拼接会丢低位指数）。
+  n_int ni = _mm256_cvtps_epi32(_mm256_max_ps(_mm256_min_ps(n, _mm256_set1_ps(127.0f)),
+                                               _mm256_set1_ps(-252.0f)));
+  n_int n1 = _mm256_max_epi32(ni, _mm256_set1_epi32(-126));
+  n_int n2 = _mm256_sub_epi32(ni, n1);
+  n_float s1 = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_add_epi32(n1, _mm256_set1_epi32(127)), 23));
+  n_float s2 = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_add_epi32(n2, _mm256_set1_epi32(127)), 23));
+
+  n_float result = _mm256_mul_ps(_mm256_mul_ps(p, s1), s2);
+
+  // 与 expf 的边界一致：上溢为 +inf，下溢为 0；NaN 输入保持 NaN。
+  result = _mm256_blendv_ps(result, _mm256_set1_ps(INFINITY),
+                            _mm256_cmp_ps(d, _mm256_set1_ps(88.722839f), _CMP_GE_OQ));
+  result = _mm256_blendv_ps(result, _mm256_setzero_ps(),
+                            _mm256_cmp_ps(d, _mm256_set1_ps(-103.972084f), _CMP_LE_OQ));
+  return result;
+}
+
 #endif // NSIMD_AVX2
 
 // ================================================================
@@ -233,13 +267,17 @@ static N_FORCEINLINE n_float _n_log_avx512(n_float d) {
     #define N_SIN(a)     _n_sin_avx512(a)
     #define N_COS(a)     _n_cos_avx512(a)
     #define N_LOG(a)     _n_log_avx512(a)
+    #define N_LOG10(a)   _mm512_mul_ps(N_LOG(a), _mm512_set1_ps(0.4342944819032518f))
   #elif defined(NSIMD_AVX2)
     #define N_SIN(a)     _n_sin_avx2(a)
     #define N_COS(a)     _n_cos_avx2(a)
     #define N_LOG(a)     _n_log_avx2(a)
+    #define N_EXP(a)     _n_exp_avx2(a)
+    #define N_LOG10(a)   _mm256_mul_ps(N_LOG(a), _mm256_set1_ps(0.4342944819032518f))
   #endif
   // 非 AVX2 平台：Sleef 已移除，由下方 #ifndef N_* 守卫的逐通道标量回退覆盖。
   // Non-AVX2: #ifndef guards below provide per-lane scalar fallback
+  // AVX512 暂缺 exp 内联实现，同样走标量回退。
 
 // ===== High (~1.0 ULP) =====
 #elif SIMD_MATH_PRECISION == 2

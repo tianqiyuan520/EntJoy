@@ -77,7 +77,7 @@ dotnet run --project tools/AutoSIMDEdgeCases/AutoSIMDEdgeCases.csproj -c Release
 
 ### Fastest 档的实测误差
 
-`NativeSIMD_math.h` 的 `SIMD_MATH_PRECISION == 1` 分支只有 `sin`/`cos`/`log` 三个函数是内联多项式，其余数学函数走逐 lane 标量回退。实测（AVX2、8 宽、`/fp:precise`，`tools/MathUlpCheck`）：
+`NativeSIMD_math.h` 的 `SIMD_MATH_PRECISION == 1` 分支里 `sin`/`cos`/`log`/`exp`/`log10` 是内联多项式（AVX2；`log10` 由 `log` 乘常数得到），其余数学函数走逐 lane 标量回退。实测（AVX2、8 宽、`/fp:precise`，`tools/MathUlpCheck`）：
 
 | 函数 | 输入域 | absULP 最大 | absULP 均值 | relULP 最大 |
 |---|---|---|---|---|
@@ -90,5 +90,8 @@ dotnet run --project tools/AutoSIMDEdgeCases/AutoSIMDEdgeCases.csproj -c Release
 | cos | [-10000, 10000] | 8174.63 | 1177.24 | 4333430 |
 | log | [1e-37, 1e38] | 128.00 | 16.57 | 8428 |
 | log | [0.999, 1.001] | 10.30 | 4.05 | 9606 |
+| exp | [-1, 1] | — | — | 1.99 |
+| exp | [-87, 88] | — | — | 2.00 |
+| log10 | [1e-37, 1e38] | 128.00 | 11.68 | — |
 
 `absULP = |out - ref| / 2^-24`，`relULP = (|out - ref| / |ref|) / 2^-24`。sin/cos 的绝对误差随 `|x|` 线性增长：三次 π/2 归约在 float 下精度有限，`|x|` 越大残余误差越大。log 的相对误差在 75 个数量级上均值 0.55 ULP，接近 1 时由绝对误差主导。
