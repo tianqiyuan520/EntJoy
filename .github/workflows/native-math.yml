@@ -62,6 +62,20 @@ jobs:
 
   # NEON：交叉编译 ＋ qemu-user 运行。数学实现目前回退到 libm，因此这里验证的是
   # 交叉编译链路与回退路径的精确性；NEON 内联实现落地后同一门禁即可覆盖。
+  # SSE4.1：无 AVX2 的 x86 路径。若已实现内联数学则在此门禁下测；未实现时测得的是 libm 回退。
+  sse41:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S tools/MathUlpCheck -B build-sse41 -DCMAKE_BUILD_TYPE=Release -DENTJOY_MATH_ISA=sse41
+      - name: Build
+        run: cmake --build build-sse41 -j
+      - name: ULP gate (Fastest, SSE4.1)
+        run: ./build-sse41/MathUlpCheck
+      - name: ULP gate (High, SSE4.1)
+        run: ./build-sse41/MathUlpCheckHigh
+
   neon:
     runs-on: ubuntu-latest
     steps:
