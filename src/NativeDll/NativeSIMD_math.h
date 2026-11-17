@@ -941,7 +941,9 @@ static N_FORCEINLINE n_float _n_cosh_neon(n_float a) {
 static N_FORCEINLINE n_float _n_tanh_neon(n_float a) {
   n_float t2 = vmulq_f32(vdupq_n_f32(2.0f), a);
   t2 = vbslq_f32(vcgtq_f32(vabsq_f32(a), vdupq_n_f32(44.0f)),
-                 vorrq_u32(vreinterpretq_u32_f32(vdupq_n_f32(88.0f)), vandq_u32(vreinterpretq_u32_f32(a), vreinterpretq_u32_f32(vdupq_n_f32(-0.0f)))),
+  t2 = vbslq_f32(vcgtq_f32(vabsq_f32(a), vdupq_n_f32(44.0f)),
+                 vreinterpretq_f32_u32(vorrq_u32(vreinterpretq_u32_f32(vdupq_n_f32(88.0f)), vandq_u32(vreinterpretq_u32_f32(a), vreinterpretq_u32_f32(vdupq_n_f32(-0.0f))))),
+                 t2);
                  t2);
   n_float e2 = _n_exp_neon(t2);
   n_float wide = vdivq_f32(vsubq_f32(e2, vdupq_n_f32(1.0f)), vaddq_f32(e2, vdupq_n_f32(1.0f)));
