@@ -1001,6 +1001,271 @@ static N_FORCEINLINE n_float _n_pow_neon(n_float x, n_float y) {
 }
 #endif // NSIMD_NEON && __aarch64__
 
+// ================================================================
+// SSE4.1 (4-wide, no FMA) inline math -- Fastest tier.
+// Same algorithms as the AVX2/NEON kernels: argument reduction in
+// double lanes (2 x __m128d), polynomials in float lanes evaluated
+// with mul+add because SSE4.1 has no FMA.
+// ================================================================
+#if defined(NSIMD_SSE4)
+
+// SSE2 原语实现：SSE4.1 的 round/blend 在 /arch:SSE2 下不可用
+static N_FORCEINLINE __m128d _n_round_nearest_pd(__m128d v) {
+  return _mm_cvtepi32_pd(_mm_cvtpd_epi32(v));
+}
+
+static N_FORCEINLINE __m128 _n_round_nearest_ps(__m128 v) {
+  return _mm_cvtepi32_ps(_mm_cvtps_epi32(v));
+}
+
+static N_FORCEINLINE __m128 _n_trunc_ps(__m128 v) {
+  return _mm_cvtepi32_ps(_mm_cvttps_epi32(v));
+}
+
+static N_FORCEINLINE __m128 _n_blend_sse41(__m128 f, __m128 t, __m128 m) {
+  return _mm_or_ps(_mm_and_ps(m, t), _mm_andnot_ps(m, f));
+}
+
+static N_FORCEINLINE __m128 _n_abs_sse41(__m128 a) {
+  return _mm_and_ps(a, _mm_castsi128_ps(_mm_set1_epi32(0x7fffffff)));
+}
+
+static N_FORCEINLINE __m128d _n_neg_pd(__m128d a) {
+  return _mm_sub_pd(_mm_setzero_pd(), a);
+}
+
+// 无 FMA：a + b*c 走两次运算
+static N_FORCEINLINE __m128d _n_madd_pd(__m128d a, __m128d b, __m128d c) {
+  return _mm_add_pd(a, _mm_mul_pd(b, c));
+}
+
+static N_FORCEINLINE __m128 _n_madd_ps(__m128 a, __m128 b, __m128 c) {
+  return _mm_add_ps(a, _mm_mul_ps(b, c));
+}
+
+static N_FORCEINLINE void _n_reduce_sse41(__m128 d, __m128* rOut, __m128i* qOut) {
+  __m128d dlo = _mm_cvtps_pd(d);
+  __m128d dhi = _mm_cvtps_pd(_mm_movehl_ps(d, d));
+  const __m128d twoOverPi = _mm_set1_pd(0.63661977236758134308);
+  __m128d qlo = _n_round_nearest_pd(_mm_mul_pd(dlo, twoOverPi));
+  __m128d qhi = _n_round_nearest_pd(_mm_mul_pd(dhi, twoOverPi));
+  // 无 FMA：首段只保留 29 位有效位，使 |q| < 2^23 时 q*pio2a 与 x-q*pio2a 都精确
+  const __m128d pio2a = _mm_set1_pd(1.57079632580280303955e+00);
+  const __m128d pio2b = _mm_set1_pd(9.92093577428798667484e-10);
+  const __m128d pio2c = _mm_set1_pd(2.25174177415621760794e-18);
+  __m128d rlo = _n_madd_pd(dlo, _n_neg_pd(qlo), pio2a);
+  __m128d rhi = _n_madd_pd(dhi, _n_neg_pd(qhi), pio2a);
+  rlo = _n_madd_pd(rlo, _n_neg_pd(qlo), pio2b);
+  rhi = _n_madd_pd(rhi, _n_neg_pd(qhi), pio2b);
+  rlo = _n_madd_pd(rlo, _n_neg_pd(qlo), pio2c);
+  rhi = _n_madd_pd(rhi, _n_neg_pd(qhi), pio2c);
+  *rOut = _mm_movelh_ps(_mm_cvtpd_ps(rlo), _mm_cvtpd_ps(rhi));
+  __m128i qloi = _mm_cvtpd_epi32(qlo);
+  __m128i qhii = _mm_cvtpd_epi32(qhi);
+  *qOut = _mm_unpacklo_epi64(qloi, qhii);
+}
+
+static N_FORCEINLINE __m128 _n_sin_poly_sse41(__m128 r) {
+  __m128 z = _mm_mul_ps(r, r);
+  __m128 p = _mm_set1_ps(-2.50521083854417187751e-8f);
+  p = _n_madd_ps(_mm_set1_ps(2.75573192239858925109e-6f), p, z);
+  p = _n_madd_ps(_mm_set1_ps(-1.98412698412698412522e-4f), p, z);
+  p = _n_madd_ps(_mm_set1_ps(8.33333333333333321769e-3f), p, z);
+  p = _n_madd_ps(_mm_set1_ps(-1.66666666666666657415e-1f), p, z);
+  return _n_madd_ps(r, _mm_mul_ps(z, r), p);
+}
+
+static N_FORCEINLINE __m128 _n_cos_poly_sse41(__m128 r) {
+  __m128 z = _mm_mul_ps(r, r);
+  __m128 p = _mm_set1_ps(2.4801587301587301587e-5f);
+  p = _n_madd_ps(_mm_set1_ps(-1.3888888888888888889e-3f), p, z);
+  p = _n_madd_ps(_mm_set1_ps(4.1666666666666666667e-2f), p, z);
+  p = _n_madd_ps(_mm_set1_ps(-5.0e-1f), p, z);
+  return _n_madd_ps(_mm_set1_ps(1.0f), p, z);
+}
+
+static N_FORCEINLINE __m128 _n_sin_sse41(__m128 d) {
+  __m128 r; __m128i q;
+  _n_reduce_sse41(d, &r, &q);
+  __m128 mOdd = _mm_castsi128_ps(_mm_cmpeq_epi32(_mm_and_si128(q, _mm_set1_epi32(1)), _mm_set1_epi32(1)));
+  __m128 u = _n_blend_sse41(_n_sin_poly_sse41(r), _n_cos_poly_sse41(r), mOdd);
+  __m128 mFlip = _mm_castsi128_ps(_mm_cmpeq_epi32(_mm_and_si128(q, _mm_set1_epi32(2)), _mm_set1_epi32(2)));
+  __m128 res = _n_blend_sse41(u, _mm_sub_ps(_mm_setzero_ps(), u), mFlip);
+  if (_mm_movemask_ps(_mm_cmpge_ps(_n_abs_sse41(d), _mm_set1_ps(1.0e7f))) != 0) {
+    float lane[4]; _mm_storeu_ps(lane, d);
+    for (int i = 0; i < 4; i++) lane[i] = ::sinf(lane[i]);
+    res = _mm_loadu_ps(lane);
+  }
+  return res;
+}
+
+static N_FORCEINLINE __m128 _n_cos_sse41(__m128 d) {
+  __m128 r; __m128i q;
+  _n_reduce_sse41(d, &r, &q);
+  __m128 mOdd = _mm_castsi128_ps(_mm_cmpeq_epi32(_mm_and_si128(q, _mm_set1_epi32(1)), _mm_set1_epi32(1)));
+  __m128 u = _n_blend_sse41(_n_cos_poly_sse41(r), _n_sin_poly_sse41(r), mOdd);
+  __m128i flip = _mm_and_si128(_mm_add_epi32(q, _mm_set1_epi32(1)), _mm_set1_epi32(2));
+  __m128 mFlip = _mm_castsi128_ps(_mm_cmpeq_epi32(flip, _mm_set1_epi32(2)));
+  __m128 res = _n_blend_sse41(u, _mm_sub_ps(_mm_setzero_ps(), u), mFlip);
+  if (_mm_movemask_ps(_mm_cmpge_ps(_n_abs_sse41(d), _mm_set1_ps(1.0e7f))) != 0) {
+    float lane[4]; _mm_storeu_ps(lane, d);
+    for (int i = 0; i < 4; i++) lane[i] = ::cosf(lane[i]);
+    res = _mm_loadu_ps(lane);
+  }
+  return res;
+}
+
+static N_FORCEINLINE __m128 _n_exp_sse41(__m128 d) {
+  __m128 n = _n_round_nearest_ps(_mm_mul_ps(d, _mm_set1_ps(1.4426950408889634f)));
+  __m128i ni = _mm_cvtps_epi32(n);
+  __m128 r = _n_madd_ps(d, _mm_sub_ps(_mm_setzero_ps(), n), _mm_set1_ps(0.693145751953125f));
+  r = _n_madd_ps(r, _mm_sub_ps(_mm_setzero_ps(), n), _mm_set1_ps(1.428606765330187045e-6f));
+  __m128 p = _mm_set1_ps(1.0f / 5040.0f);
+  p = _n_madd_ps(_mm_set1_ps(1.0f / 720.0f), p, r);
+  p = _n_madd_ps(_mm_set1_ps(1.0f / 120.0f), p, r);
+  p = _n_madd_ps(_mm_set1_ps(1.0f / 24.0f), p, r);
+  p = _n_madd_ps(_mm_set1_ps(1.0f / 6.0f), p, r);
+  p = _n_madd_ps(_mm_set1_ps(0.5f), p, r);
+  p = _n_madd_ps(_mm_set1_ps(1.0f), p, r);
+  p = _n_madd_ps(_mm_set1_ps(1.0f), p, r);
+  __m128i e = _mm_slli_epi32(_mm_add_epi32(ni, _mm_set1_epi32(127)), 23);
+  __m128 result = _mm_mul_ps(p, _mm_castsi128_ps(e));
+  result = _n_blend_sse41(result, _mm_set1_ps(INFINITY), _mm_cmpgt_ps(d, _mm_set1_ps(88.722839f)));
+  return _n_blend_sse41(result, _mm_setzero_ps(), _mm_cmplt_ps(d, _mm_set1_ps(-103.972084f)));
+}
+
+static N_FORCEINLINE __m128 _n_log_sse41(__m128 d) {
+  __m128 t = _mm_sub_ps(d, _mm_set1_ps(1.0f));
+  __m128 at = _n_abs_sse41(t);
+
+  __m128 s = _mm_set1_ps(1.0f / 13.0f);
+  s = _n_madd_ps(_mm_set1_ps(-1.0f / 12.0f), s, t);
+  s = _n_madd_ps(_mm_set1_ps(1.0f / 11.0f), s, t);
+  s = _n_madd_ps(_mm_set1_ps(-1.0f / 10.0f), s, t);
+  s = _n_madd_ps(_mm_set1_ps(1.0f / 9.0f), s, t);
+  s = _n_madd_ps(_mm_set1_ps(-1.0f / 8.0f), s, t);
+  s = _n_madd_ps(_mm_set1_ps(1.0f / 7.0f), s, t);
+  s = _n_madd_ps(_mm_set1_ps(-1.0f / 6.0f), s, t);
+  s = _n_madd_ps(_mm_set1_ps(1.0f / 5.0f), s, t);
+  s = _n_madd_ps(_mm_set1_ps(-1.0f / 4.0f), s, t);
+  s = _n_madd_ps(_mm_set1_ps(1.0f / 3.0f), s, t);
+  s = _n_madd_ps(_mm_set1_ps(-1.0f / 2.0f), s, t);
+  s = _n_madd_ps(_mm_set1_ps(1.0f), s, t);
+  __m128 near = _mm_mul_ps(t, s);
+
+  __m128i k = _mm_castps_si128(d);
+  __m128i e = _mm_sub_epi32(_mm_srli_epi32(k, 23), _mm_set1_epi32(127));
+  __m128 m = _mm_castsi128_ps(_mm_or_si128(_mm_and_si128(k, _mm_set1_epi32(0x807fffff)), _mm_set1_epi32(0x3f800000)));
+  __m128 x = _mm_div_ps(_mm_sub_ps(m, _mm_set1_ps(1.0f)), _mm_add_ps(m, _mm_set1_ps(1.0f)));
+  __m128 x2 = _mm_mul_ps(x, x);
+  __m128 p = _mm_set1_ps(0.15384615384615385f);
+  p = _n_madd_ps(_mm_set1_ps(0.18181818181818182f), p, x2);
+  p = _n_madd_ps(_mm_set1_ps(0.2222222222222222f), p, x2);
+  p = _n_madd_ps(_mm_set1_ps(0.2857142857142857f), p, x2);
+  p = _n_madd_ps(_mm_set1_ps(0.4f), p, x2);
+  p = _n_madd_ps(_mm_set1_ps(0.6666666666666666f), p, x2);
+  p = _n_madd_ps(_mm_set1_ps(2.0f), p, x2);
+  __m128 ef = _mm_cvtepi32_ps(e);
+  __m128 wide = _mm_mul_ps(ef, _mm_set1_ps(0.693145751953125f));
+  wide = _n_madd_ps(wide, ef, _mm_set1_ps(1.428606765330187045e-6f));
+  wide = _n_madd_ps(wide, x, p);
+  return _n_blend_sse41(wide, near, _mm_cmple_ps(at, _mm_set1_ps(0.25f)));
+}
+
+static N_FORCEINLINE __m128 _n_log10_sse41(__m128 d) {
+  return _mm_mul_ps(_n_log_sse41(d), _mm_set1_ps(0.4342944819032518f));
+}
+
+static N_FORCEINLINE __m128 _n_tan_sse41(__m128 a) {
+  return _mm_div_ps(_n_sin_sse41(a), _n_cos_sse41(a));
+}
+
+static N_FORCEINLINE __m128 _n_atan_sse41(__m128 a) {
+  const __m128 one = _mm_set1_ps(1.0f);
+  const __m128 zero = _mm_setzero_ps();
+  __m128 ax = _n_abs_sse41(a);
+  __m128 big = _mm_cmpgt_ps(ax, one);
+  __m128 t = _n_blend_sse41(ax, _mm_div_ps(one, ax), big);
+  __m128 z = _mm_mul_ps(t, t);
+  __m128 q = _mm_set1_ps(2.922975910e-03f);
+  q = _n_madd_ps(_mm_set1_ps(-1.637927326e-02f), q, z);
+  q = _n_madd_ps(_mm_set1_ps(4.323442722e-02f), q, z);
+  q = _n_madd_ps(_mm_set1_ps(-7.554515826e-02f), q, z);
+  q = _n_madd_ps(_mm_set1_ps(1.066727714e-01f), q, z);
+  q = _n_madd_ps(_mm_set1_ps(-1.421142270e-01f), q, z);
+  q = _n_madd_ps(_mm_set1_ps(1.999382071e-01f), q, z);
+  q = _n_madd_ps(_mm_set1_ps(-3.333315467e-01f), q, z);
+  __m128 r = _n_madd_ps(t, _mm_mul_ps(_mm_mul_ps(t, t), t), q);
+  r = _n_blend_sse41(r, _mm_sub_ps(_mm_set1_ps(1.5707963267948966f), r), big);
+  return _n_blend_sse41(r, _mm_sub_ps(zero, r), _mm_cmplt_ps(a, zero));
+}
+
+static N_FORCEINLINE __m128 _n_atan2_sse41(__m128 y, __m128 x) {
+  const __m128 zero = _mm_setzero_ps();
+  const __m128 pi = _mm_set1_ps(3.14159265358979323846f);
+  __m128 r = _n_atan_sse41(_mm_div_ps(y, x));
+  __m128 adj = _n_blend_sse41(_mm_sub_ps(zero, pi), pi, _mm_cmpge_ps(y, zero));
+  r = _n_blend_sse41(r, _mm_add_ps(r, adj), _mm_cmplt_ps(x, zero));
+  __m128 bothZero = _mm_and_ps(_mm_cmpeq_ps(x, zero), _mm_cmpeq_ps(y, zero));
+  return _n_blend_sse41(r, zero, bothZero);
+}
+
+static N_FORCEINLINE __m128 _n_asin_sse41(__m128 a) {
+  const __m128 one = _mm_set1_ps(1.0f);
+  __m128 t = _mm_sqrt_ps(_mm_max_ps(_mm_mul_ps(_mm_sub_ps(one, a), _mm_add_ps(one, a)), _mm_setzero_ps()));
+  return _mm_mul_ps(_mm_set1_ps(2.0f), _n_atan2_sse41(a, _mm_add_ps(one, t)));
+}
+
+static N_FORCEINLINE __m128 _n_acos_sse41(__m128 a) {
+  const __m128 one = _mm_set1_ps(1.0f);
+  __m128 t = _mm_sqrt_ps(_mm_max_ps(_mm_mul_ps(_mm_sub_ps(one, a), _mm_add_ps(one, a)), _mm_setzero_ps()));
+  __m128 r = _mm_mul_ps(_mm_set1_ps(2.0f), _n_atan2_sse41(t, _mm_add_ps(one, a)));
+  return _n_blend_sse41(r, _mm_set1_ps(3.14159265358979323846f), _mm_cmple_ps(a, _mm_set1_ps(-1.0f)));
+}
+
+static N_FORCEINLINE __m128 _n_sinh_sse41(__m128 a) {
+  __m128 e = _n_exp_sse41(a);
+  __m128 inv = _n_exp_sse41(_mm_sub_ps(_mm_setzero_ps(), a));
+  __m128 wide = _mm_mul_ps(_mm_set1_ps(0.5f), _mm_sub_ps(e, inv));
+  __m128 z = _mm_mul_ps(a, a);
+  __m128 sp = _mm_set1_ps(1.0f / 5040.0f);
+  sp = _n_madd_ps(_mm_set1_ps(1.0f / 120.0f), sp, z);
+  sp = _n_madd_ps(_mm_set1_ps(1.0f / 6.0f), sp, z);
+  sp = _n_madd_ps(_mm_set1_ps(1.0f), sp, z);
+  return _n_blend_sse41(wide, _mm_mul_ps(a, sp), _mm_cmplt_ps(_n_abs_sse41(a), _mm_set1_ps(0.25f)));
+}
+
+static N_FORCEINLINE __m128 _n_cosh_sse41(__m128 a) {
+  __m128 e = _n_exp_sse41(a);
+  __m128 inv = _n_exp_sse41(_mm_sub_ps(_mm_setzero_ps(), a));
+  __m128 wide = _mm_mul_ps(_mm_set1_ps(0.5f), _mm_add_ps(e, inv));
+  __m128 z = _mm_mul_ps(a, a);
+  __m128 sp = _mm_set1_ps(1.0f / 720.0f);
+  sp = _n_madd_ps(_mm_set1_ps(1.0f / 24.0f), sp, z);
+  sp = _n_madd_ps(_mm_set1_ps(0.5f), sp, z);
+  sp = _n_madd_ps(_mm_set1_ps(1.0f), sp, z);
+  return _n_blend_sse41(wide, sp, _mm_cmplt_ps(_n_abs_sse41(a), _mm_set1_ps(0.25f)));
+}
+
+static N_FORCEINLINE __m128 _n_tanh_sse41(__m128 a) {
+  __m128 e2 = _n_exp_sse41(_mm_mul_ps(_mm_set1_ps(2.0f), a));
+  __m128 wide = _mm_div_ps(_mm_sub_ps(e2, _mm_set1_ps(1.0f)), _mm_add_ps(e2, _mm_set1_ps(1.0f)));
+  __m128 z = _mm_mul_ps(a, a);
+  __m128 sp = _mm_set1_ps(62.0f / 2835.0f);
+  sp = _n_madd_ps(_mm_set1_ps(-17.0f / 315.0f), sp, z);
+  sp = _n_madd_ps(_mm_set1_ps(2.0f / 15.0f), sp, z);
+  sp = _n_madd_ps(_mm_set1_ps(-1.0f / 3.0f), sp, z);
+  sp = _n_madd_ps(_mm_set1_ps(1.0f), sp, z);
+  return _n_blend_sse41(wide, _mm_mul_ps(a, sp), _mm_cmplt_ps(_n_abs_sse41(a), _mm_set1_ps(0.25f)));
+}
+
+static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
+  *s = _n_sin_sse41(a);
+  *c = _n_cos_sse41(a);
+}
+
+#endif // NSIMD_SSE4
+
 // ===== Fastest (~3.5 ULP) =====
 #if SIMD_MATH_PRECISION == 1
 
@@ -1027,6 +1292,22 @@ static N_FORCEINLINE n_float _n_pow_neon(n_float x, n_float y) {
     #define N_LOG(a)     _n_log_avx2(a)
     #define N_EXP(a)     _n_exp_avx2(a)
     #define N_LOG10(a)   _mm256_mul_ps(N_LOG(a), _mm256_set1_ps(0.4342944819032518f))
+  #elif defined(NSIMD_SSE4)
+  #define N_SIN(a)     _n_sin_sse41(a)
+  #define N_COS(a)     _n_cos_sse41(a)
+  #define N_LOG(a)     _n_log_sse41(a)
+  #define N_EXP(a)     _n_exp_sse41(a)
+  #define N_LOG10(a)   _mm_mul_ps(N_LOG(a), _mm_set1_ps(0.4342944819032518f))
+  // pow 在 SSE4 上走 libm 回退：无 FMA 时 log2/exp2 精度不足，守不住 ULP 门禁
+  #define N_TAN(a)       _n_tan_sse41(a)
+  #define N_ASIN(a)      _n_asin_sse41(a)
+  #define N_ACOS(a)      _n_acos_sse41(a)
+  #define N_ATAN(a)      _n_atan_sse41(a)
+  #define N_ATAN2(a,b)   _n_atan2_sse41(a, b)
+  #define N_SINH(a)      _n_sinh_sse41(a)
+  #define N_COSH(a)      _n_cosh_sse41(a)
+  #define N_TANH(a)      _n_tanh_sse41(a)
+  #define N_SINCOS(a,s,c) _n_sincos_sse41(a, s, c)
 #elif defined(NSIMD_NEON) && defined(__aarch64__)
 #define N_SIN(a)     _n_sin_neon(a)
 #define N_COS(a)     _n_cos_neon(a)
