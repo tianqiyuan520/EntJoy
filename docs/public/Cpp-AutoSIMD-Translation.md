@@ -113,7 +113,7 @@ dotnet run --project tools/AutoSIMDPerf/AutoSIMDPerf.csproj -c Release
 
 ### Fastest 档的实测误差
 
-精度档只作用于向量 lane 路径：生成代码的标量尾巴（`::expf(x)` 这类）直接调 libm，同一 job 里向量段与标量段用的不是同一套实现。`NativeSIMD_math.h` 的 `SIMD_MATH_PRECISION == 1` 分支里 `sin`/`cos`/`log`/`exp` 是内联多项式（AVX2），`log10`/`tan`/`asin`/`acos`/`atan`/`atan2`/`sinh`/`cosh`/`tanh`/`pow`/`sincos` 由它们组合而成；只有 AVX512 与非 AVX2 平台仍走逐 lane 标量回退。实测（AVX2、8 宽、`/fp:precise`，`tools/MathUlpCheck`）：
+精度档只作用于向量 lane 路径：生成代码的标量段（尾部元素、未向量化的 job）通过 `EJ_*` 入口调用与向量体同一套实现（精度档为 `IEEE` 时才是 libm），因此同一 job 内不会出现两套精度。`NativeSIMD_math.h` 的 `SIMD_MATH_PRECISION == 1` 分支里 `sin`/`cos`/`log`/`exp` 是内联多项式（AVX2），`log10`/`tan`/`asin`/`acos`/`atan`/`atan2`/`sinh`/`cosh`/`tanh`/`pow`/`sincos` 由它们组合而成；只有 AVX512 与非 AVX2 平台仍走逐 lane 标量回退。实测（AVX2、8 宽、`/fp:precise`，`tools/MathUlpCheck`）：
 
 | 函数 | 输入域 | absULP 最大 | absULP 均值 | relULP 最大 |
 |---|---|---|---|---|
@@ -175,3 +175,12 @@ dotnet run --project tools/AutoSIMDPerf/AutoSIMDPerf.csproj -c Release
 | `sin+cos+log` | 1.57–1.91 | 0.42–0.44 | 3.75–4.46× |
 
 纯算术 body 已经撞到内存带宽，向量化不再带来收益；收益来自用内联多项式替代逐元素 libm 调用，以及摊薄循环开销。读数随机器负载浮动，跨运行不可相减。
+### 平台覆盖
+
+| 平台 | Fastest | High |
+|---|---|---|
+| AVX2 | 内联多项式（本机实测 1–3 ULP） | double 中间精度（0–1 ULP） |
+| AVX512 | 只覆盖 `sin`/`cos`/`log`，其余逐 lane 回退；实现未与 AVX2 同步 | 逐 lane libm |
+| NEON / SSE4 | 逐 lane libm | 逐 lane libm |
+
+AVX512 与 NEON 这两条线的实现没有运行验证的硬件条件：本机 CPU 不支持 AVX512，也没有 ARM 设备。NEON 目标可以用 clang 交叉编译做语法与类型检查，AVX512 同理。
