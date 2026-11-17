@@ -5,13 +5,15 @@
 #include <vector>
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <functional>
 #include "NativeSIMD_math.h"
 
 namespace
 {
     using Clock = std::chrono::steady_clock;
-    constexpr int N = 1 << 20;
+    // qemu 下每轮元素数按 ENTJOY_BENCH_N 缩小，比值仍可比
+    const int N = [] { const char* v = std::getenv("ENTJOY_BENCH_N"); return v ? std::atoi(v) : (1 << 20); }();
 
     double Median(std::vector<double> v)
     {
@@ -50,36 +52,36 @@ int main()
     std::printf("每元素耗时（%d 元素 x 7 轮，取中位）\n", N);
 
     Compare("exp", in.data(),
-        [](const float* x, float* o) { _mm256_storeu_ps(o, N_EXP(_mm256_loadu_ps(x))); },
+        [](const float* x, float* o) { n_store_ps(o, N_EXP(n_load_ps(x))); },
         [](float x) { return ::expf(x); });
     Compare("log", inPos.data(),
-        [](const float* x, float* o) { _mm256_storeu_ps(o, N_LOG(_mm256_loadu_ps(x))); },
+        [](const float* x, float* o) { n_store_ps(o, N_LOG(n_load_ps(x))); },
         [](float x) { return ::logf(x); });
     Compare("tan", in.data(),
-        [](const float* x, float* o) { _mm256_storeu_ps(o, N_TAN(_mm256_loadu_ps(x))); },
+        [](const float* x, float* o) { n_store_ps(o, N_TAN(n_load_ps(x))); },
         [](float x) { return ::tanf(x); });
     Compare("atan", in.data(),
-        [](const float* x, float* o) { _mm256_storeu_ps(o, N_ATAN(_mm256_loadu_ps(x))); },
+        [](const float* x, float* o) { n_store_ps(o, N_ATAN(n_load_ps(x))); },
         [](float x) { return ::atanf(x); });
     Compare("asin", in.data(),
-        [](const float* x, float* o) { _mm256_storeu_ps(o, N_ASIN(_mm256_loadu_ps(x))); },
+        [](const float* x, float* o) { n_store_ps(o, N_ASIN(n_load_ps(x))); },
         [](float x) { return ::asinf(x); });
     Compare("acos", in.data(),
-        [](const float* x, float* o) { _mm256_storeu_ps(o, N_ACOS(_mm256_loadu_ps(x))); },
+        [](const float* x, float* o) { n_store_ps(o, N_ACOS(n_load_ps(x))); },
         [](float x) { return ::acosf(x); });
     Compare("sinh", in.data(),
-        [](const float* x, float* o) { _mm256_storeu_ps(o, N_SINH(_mm256_loadu_ps(x))); },
+        [](const float* x, float* o) { n_store_ps(o, N_SINH(n_load_ps(x))); },
         [](float x) { return ::sinhf(x); });
     Compare("cosh", in.data(),
-        [](const float* x, float* o) { _mm256_storeu_ps(o, N_COSH(_mm256_loadu_ps(x))); },
+        [](const float* x, float* o) { n_store_ps(o, N_COSH(n_load_ps(x))); },
         [](float x) { return ::coshf(x); });
     Compare("tanh", in.data(),
-        [](const float* x, float* o) { _mm256_storeu_ps(o, N_TANH(_mm256_loadu_ps(x))); },
+        [](const float* x, float* o) { n_store_ps(o, N_TANH(n_load_ps(x))); },
         [](float x) { return ::tanhf(x); });
     Compare("pow", inPos.data(),
         [](const float* x, float* o) {
-            __m256 b = _mm256_set1_ps(1.7f);
-            _mm256_storeu_ps(o, N_POW(_mm256_loadu_ps(x), b));
+            n_float b = n_set1_ps(1.7f);
+            n_store_ps(o, N_POW(n_load_ps(x), b));
         },
         [](float x) { return ::powf(x, 1.7f); }, true);
     return 0;

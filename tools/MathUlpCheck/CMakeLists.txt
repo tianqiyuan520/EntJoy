@@ -61,7 +61,5 @@ entjoy_math_target(MathUlpCheck      ulp.cpp   1)
 entjoy_math_target(MathUlpCheckHigh  ulp.cpp   2)
 
 # 吞吐对照只在 AVX2 上编译：bench.cpp 直接用了 AVX2 intrinsics 与 NEON/AVX512 无关
-if(ENTJOY_MATH_ISA STREQUAL "avx2")
-    entjoy_math_target(MathExpBench      bench.cpp 1)
-    entjoy_math_target(MathHighBench     bench.cpp 2)
-endif()
+entjoy_math_target(MathExpBench      bench.cpp 1)
+entjoy_math_target(MathHighBench     bench.cpp 2)

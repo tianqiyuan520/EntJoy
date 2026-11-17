@@ -185,6 +185,24 @@ dotnet run --project tools/AutoSIMDPerf/AutoSIMDPerf.csproj -c Release
 | SSE4.1 | 双精度归约＋float 多项式，全函数（1–3 ULP；`pow` 走 libm） | 逐 lane libm |
 | 其它 | 逐 lane libm | 逐 lane libm |
 
+加速比（相对逐 lane libm，同进程交替 7 轮取中位，单位 ns/元素）：
+
+| 函数 | AVX2 (8-wide) | SSE4.1 (4-wide) |
+|---|---|---|
+| exp | 0.33 vs 1.90 → 5.7x | 0.90 vs 1.72 → 1.9x |
+| log | 0.54 vs 2.06 → 3.8x | 1.6 vs 1.96 → 1.2x |
+| tan | 0.61 vs 1.91 → 3.1x | 1.96 vs 1.90 → 1.0x |
+| atan | 0.29 vs 2.54 → 8.6x | 1.09 vs 2.54 → 2.3x |
+| asin | 0.65 vs 2.95 → 4.6x | 2.06 vs 2.98 → 1.4x |
+| acos | 0.74 vs 2.90 → 3.9x | 2.45 vs 2.82 → 1.1x |
+| sinh | 0.81 vs 3.26 → 4.0x | 2.2 vs 3.26 → 1.5x |
+| cosh | 0.81 vs 2.96 → 3.7x | 2.24 vs 3.0 → 1.3x |
+| tanh | 0.59 vs 2.87 → 4.9x | 1.46 vs 2.9 → 2.0x |
+| pow | 2.14 vs 4.31 → 2.0x | libm 回退 |
+
+SSE4.1 只有 4 lane 且没有 FMA，`tan`/`log`/`acos` 基本没有收益（≤1.2x）；
+AVX2 全函数都在 2x 以上。
+
 AVX512 与 NEON 这两条线的实现没有运行验证的硬件条件：本机 CPU 不支持 AVX512，也没有 ARM 设备。NEON 目标可以用 clang 交叉编译做语法与类型检查，AVX512 同理。
 ### 跨平台数值门禁
 
