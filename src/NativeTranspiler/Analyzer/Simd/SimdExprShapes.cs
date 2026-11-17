@@ -27,10 +27,7 @@ namespace NativeTranspiler.Analyzer
         HoistedBroadcast = 1 << 4,
 
         /// <summary>gather 结果（`n_gather_*`），分量访问按向量成员形式处理。</summary>
-        Gather = 1 << 5,
-
-        /// <summary>生成器分配的 varying 变量名（`v_*`）。</summary>
-        VaryingVar = 1 << 6
+        Gather = 1 << 5
     }
 
     internal static class SimdExprShapes
@@ -53,8 +50,6 @@ namespace NativeTranspiler.Analyzer
                 traits |= SimdExprTraits.Intrinsic;
             if (translated.StartsWith("n_gather", StringComparison.Ordinal))
                 traits |= SimdExprTraits.Gather;
-            if (translated.StartsWith("v_", StringComparison.Ordinal))
-                traits |= SimdExprTraits.VaryingVar;
             return traits;
         }
 
