@@ -541,6 +541,38 @@ static N_FORCEINLINE void _n_high_sincos(__m256 x, __m256* s, __m256* c) {
 // ================================================================
 #if defined(NSIMD_AVX512)
 
+// High 档在 AVX512 上复用 AVX2 的 __m256 实现：16 lane 拆两组 8 lane
+#define _N_HIGH_AVX512_UNARY(name)                                                     \
+  static N_FORCEINLINE n_float _n_high_##name##_avx512(n_float x) {                    \
+    __m256 lo = _n_high_##name(_mm512_castps512_ps256(x));                             \
+    __m256 hi = _n_high_##name(_mm512_extractf32x8_ps(x, 1));                          \
+    return _mm512_insertf32x8(_mm512_castps256_ps512(lo), hi, 1);                      \
+  }
+
+_N_HIGH_AVX512_UNARY(sin)
+_N_HIGH_AVX512_UNARY(cos)
+_N_HIGH_AVX512_UNARY(tan)
+_N_HIGH_AVX512_UNARY(atan)
+_N_HIGH_AVX512_UNARY(asin)
+_N_HIGH_AVX512_UNARY(acos)
+_N_HIGH_AVX512_UNARY(sinh)
+_N_HIGH_AVX512_UNARY(cosh)
+_N_HIGH_AVX512_UNARY(tanh)
+_N_HIGH_AVX512_UNARY(exp)
+_N_HIGH_AVX512_UNARY(log)
+_N_HIGH_AVX512_UNARY(log10)
+
+static N_FORCEINLINE n_float _n_high_atan2_avx512(n_float y, n_float x) {
+  __m256 lo = _n_high_atan2(_mm512_castps512_ps256(y), _mm512_castps512_ps256(x));
+  __m256 hi = _n_high_atan2(_mm512_extractf32x8_ps(y, 1), _mm512_extractf32x8_ps(x, 1));
+  return _mm512_insertf32x8(_mm512_castps256_ps512(lo), hi, 1);
+}
+
+static N_FORCEINLINE void _n_high_sincos_avx512(n_float x, n_float* s, n_float* c) {
+  *s = _n_high_sin_avx512(x);
+  *c = _n_high_cos_avx512(x);
+}
+
 // AVX512 濠㈣泛绉堕弫銈咁啅閺屻儳宕ｉ悹鍥﹁兌濞?AVX2 闁告劕鎳忛悧鎶芥晬?6 lane 闁瑰嘲妫旂悮杈╃磼?8 lane闁?
 // 512 濞达絽绉磋ぐ褔鎮介妸銈囪壘閻犱礁鐏濋悺銊︾▔鎼达絿鏆柡鍫灣缁秹宕ラ崼顒傜闁轰焦婢橀鐔衡偓鍦仧楠炲洦绌卞┑鍥х槷闁告娲戦崬銈夋晬瀹€鍕級闁稿繐绉崇悮杈ㄧ附濡炴儳鏁╅柣顔昏兌缁ㄦ寧鎯旈敃鈧崹搴ㄥ矗婢跺牃鍋?
 static N_FORCEINLINE n_float _n_sin_avx512(n_float d) {
@@ -572,6 +604,107 @@ static N_FORCEINLINE n_float _n_pow_avx512(n_float x, n_float y) {
   __m256 hi = _n_pow_avx2_ps(_mm512_extractf32x8_ps(x, 1), _mm512_extractf32x8_ps(y, 1));
   return _mm512_insertf32x8(_mm512_castps256_ps512(lo), hi, 1);
 }
+// AVX512 组合函数：与 AVX2 同一套公式，掩码改用 __mmask16 + _mm512_mask_blend_ps。
+// 放在 AVX512 基础实现之后，供 Fastest 档宏使用。
+static N_FORCEINLINE n_float _n_abs_avx512(n_float a) {
+  return _mm512_castsi512_ps(_mm512_and_si512(_mm512_castps_si512(a), _mm512_set1_epi32(0x7fffffff)));
+}
+
+static N_FORCEINLINE n_float _n_tan_avx512(n_float a) {
+  return _mm512_div_ps(_n_sin_avx512(a), _n_cos_avx512(a));
+}
+
+static N_FORCEINLINE n_float _n_atan_avx512(n_float a) {
+  const __m512 one = _mm512_set1_ps(1.0f);
+  const __m512 zero = _mm512_setzero_ps();
+  __m512 ax = _n_abs_avx512(a);
+  __mmask16 big = _mm512_cmp_ps_mask(ax, one, _CMP_GT_OQ);
+  __m512 t = _mm512_mask_blend_ps(big, ax, _mm512_div_ps(one, ax));
+  __m512 z = _mm512_mul_ps(t, t);
+  __m512 q = _mm512_set1_ps(2.922975910e-03f);
+  q = _mm512_fmadd_ps(q, z, _mm512_set1_ps(-1.637927326e-02f));
+  q = _mm512_fmadd_ps(q, z, _mm512_set1_ps(4.323442722e-02f));
+  q = _mm512_fmadd_ps(q, z, _mm512_set1_ps(-7.554515826e-02f));
+  q = _mm512_fmadd_ps(q, z, _mm512_set1_ps(1.066727714e-01f));
+  q = _mm512_fmadd_ps(q, z, _mm512_set1_ps(-1.421142270e-01f));
+  q = _mm512_fmadd_ps(q, z, _mm512_set1_ps(1.999382071e-01f));
+  q = _mm512_fmadd_ps(q, z, _mm512_set1_ps(-3.333315467e-01f));
+  __m512 r = _mm512_fmadd_ps(_mm512_mul_ps(_mm512_mul_ps(t, t), t), q, t);
+  r = _mm512_mask_blend_ps(big, r, _mm512_sub_ps(_mm512_set1_ps(1.5707963267948966f), r));
+  __mmask16 neg = _mm512_cmp_ps_mask(a, zero, _CMP_LT_OQ);
+  return _mm512_mask_blend_ps(neg, r, _mm512_sub_ps(zero, r));
+}
+
+static N_FORCEINLINE n_float _n_atan2_avx512(n_float y, n_float x) {
+  const __m512 zero = _mm512_setzero_ps();
+  const __m512 pi = _mm512_set1_ps(3.14159265358979323846f);
+  __m512 r = _n_atan_avx512(_mm512_div_ps(y, x));
+  __mmask16 yn = _mm512_cmp_ps_mask(y, zero, _CMP_GE_OQ);
+  __m512 adj = _mm512_mask_blend_ps(yn, _mm512_sub_ps(zero, pi), pi);
+  __mmask16 xn = _mm512_cmp_ps_mask(x, zero, _CMP_LT_OQ);
+  r = _mm512_mask_blend_ps(xn, r, _mm512_add_ps(r, adj));
+  __mmask16 bothZero = _mm512_cmp_ps_mask(x, zero, _CMP_EQ_OQ) & _mm512_cmp_ps_mask(y, zero, _CMP_EQ_OQ);
+  return _mm512_mask_blend_ps(bothZero, r, zero);
+}
+
+static N_FORCEINLINE n_float _n_asin_avx512(n_float a) {
+  const __m512 one = _mm512_set1_ps(1.0f);
+  __m512 t = _mm512_sqrt_ps(_mm512_max_ps(_mm512_mul_ps(_mm512_sub_ps(one, a), _mm512_add_ps(one, a)), _mm512_setzero_ps()));
+  return _mm512_mul_ps(_mm512_set1_ps(2.0f), _n_atan2_avx512(a, _mm512_add_ps(one, t)));
+}
+
+static N_FORCEINLINE n_float _n_acos_avx512(n_float a) {
+  const __m512 one = _mm512_set1_ps(1.0f);
+  __m512 t = _mm512_sqrt_ps(_mm512_max_ps(_mm512_mul_ps(_mm512_sub_ps(one, a), _mm512_add_ps(one, a)), _mm512_setzero_ps()));
+  __m512 r = _mm512_mul_ps(_mm512_set1_ps(2.0f), _n_atan2_avx512(t, _mm512_add_ps(one, a)));
+  __mmask16 low = _mm512_cmp_ps_mask(a, _mm512_set1_ps(-1.0f), _CMP_LE_OQ);
+  return _mm512_mask_blend_ps(low, r, _mm512_set1_ps(3.14159265358979323846f));
+}
+
+static N_FORCEINLINE n_float _n_sinh_avx512(n_float a) {
+  __m512 e = _n_exp_avx512(a);
+  __m512 inv = _n_exp_avx512(_mm512_sub_ps(_mm512_setzero_ps(), a));
+  __m512 wide = _mm512_mul_ps(_mm512_set1_ps(0.5f), _mm512_sub_ps(e, inv));
+  __m512 z = _mm512_mul_ps(a, a);
+  __m512 sp = _mm512_set1_ps(1.0f / 5040.0f);
+  sp = _mm512_fmadd_ps(sp, z, _mm512_set1_ps(1.0f / 120.0f));
+  sp = _mm512_fmadd_ps(sp, z, _mm512_set1_ps(1.0f / 6.0f));
+  sp = _mm512_fmadd_ps(sp, z, _mm512_set1_ps(1.0f));
+  __mmask16 small = _mm512_cmp_ps_mask(_n_abs_avx512(a), _mm512_set1_ps(0.25f), _CMP_LT_OQ);
+  return _mm512_mask_blend_ps(small, wide, _mm512_mul_ps(a, sp));
+}
+
+static N_FORCEINLINE n_float _n_cosh_avx512(n_float a) {
+  __m512 e = _n_exp_avx512(a);
+  __m512 inv = _n_exp_avx512(_mm512_sub_ps(_mm512_setzero_ps(), a));
+  __m512 wide = _mm512_mul_ps(_mm512_set1_ps(0.5f), _mm512_add_ps(e, inv));
+  __m512 z = _mm512_mul_ps(a, a);
+  __m512 sp = _mm512_set1_ps(1.0f / 720.0f);
+  sp = _mm512_fmadd_ps(sp, z, _mm512_set1_ps(1.0f / 24.0f));
+  sp = _mm512_fmadd_ps(sp, z, _mm512_set1_ps(0.5f));
+  sp = _mm512_fmadd_ps(sp, z, _mm512_set1_ps(1.0f));
+  __mmask16 small = _mm512_cmp_ps_mask(_n_abs_avx512(a), _mm512_set1_ps(0.25f), _CMP_LT_OQ);
+  return _mm512_mask_blend_ps(small, wide, sp);
+}
+
+static N_FORCEINLINE n_float _n_tanh_avx512(n_float a) {
+  __m512 e2 = _n_exp_avx512(_mm512_mul_ps(_mm512_set1_ps(2.0f), a));
+  __m512 wide = _mm512_div_ps(_mm512_sub_ps(e2, _mm512_set1_ps(1.0f)), _mm512_add_ps(e2, _mm512_set1_ps(1.0f)));
+  __m512 z = _mm512_mul_ps(a, a);
+  __m512 sp = _mm512_set1_ps(62.0f / 2835.0f);
+  sp = _mm512_fmadd_ps(sp, z, _mm512_set1_ps(-17.0f / 315.0f));
+  sp = _mm512_fmadd_ps(sp, z, _mm512_set1_ps(2.0f / 15.0f));
+  sp = _mm512_fmadd_ps(sp, z, _mm512_set1_ps(-1.0f / 3.0f));
+  sp = _mm512_fmadd_ps(sp, z, _mm512_set1_ps(1.0f));
+  __mmask16 small = _mm512_cmp_ps_mask(_n_abs_avx512(a), _mm512_set1_ps(0.25f), _CMP_LT_OQ);
+  return _mm512_mask_blend_ps(small, wide, _mm512_mul_ps(a, sp));
+}
+
+static N_FORCEINLINE void _n_sincos_avx512(n_float a, n_float* s, n_float* c) {
+  *s = _n_sin_avx512(a);
+  *c = _n_cos_avx512(a);
+}
+
 #endif // NSIMD_AVX512
 
 
@@ -810,6 +943,15 @@ static N_FORCEINLINE n_float _n_tanh_neon(n_float a) {
     #define N_EXP(a)     _n_exp_avx512(a)
     #define N_LOG10(a)   _mm512_mul_ps(N_LOG(a), _mm512_set1_ps(0.4342944819032518f))
     #define N_POW(a,b)   _n_pow_avx512(a, b)
+  #define N_TAN(a)       _n_tan_avx512(a)
+  #define N_ASIN(a)      _n_asin_avx512(a)
+  #define N_ACOS(a)      _n_acos_avx512(a)
+  #define N_ATAN(a)      _n_atan_avx512(a)
+  #define N_ATAN2(a,b)   _n_atan2_avx512(a, b)
+  #define N_SINH(a)      _n_sinh_avx512(a)
+  #define N_COSH(a)      _n_cosh_avx512(a)
+  #define N_TANH(a)      _n_tanh_avx512(a)
+  #define N_SINCOS(a,s,c) _n_sincos_avx512(a, s, c)
   #elif defined(NSIMD_AVX2)
     #define N_SIN(a)     _n_sin_avx2(a)
     #define N_COS(a)     _n_cos_avx2(a)
@@ -856,7 +998,23 @@ static N_FORCEINLINE n_float _n_tanh_neon(n_float a) {
 // ===== High (~1.0 ULP) =====
 #elif SIMD_MATH_PRECISION == 2
   // double 濞戞搩鍙冨Λ璺ㄥ垝閹冾唺閻庡湱鍋熼獮鍥晬閸︽彜X2闁挎稑顧€缁遍亶宕楃捄铏规殜妤犵偛鍟胯ぐ鎾偨?#ifndef 閻庣懓鐗嗗畷濂稿炊閻愯　鍋撻埀顒勫礆娴肩补鍋?lane libm
-  #if defined(NSIMD_AVX2)
+  #if defined(NSIMD_AVX512)
+    #define N_SIN(a)       _n_high_sin_avx512(a)
+    #define N_COS(a)       _n_high_cos_avx512(a)
+    #define N_TAN(a)       _n_high_tan_avx512(a)
+    #define N_ASIN(a)      _n_high_asin_avx512(a)
+    #define N_ACOS(a)      _n_high_acos_avx512(a)
+    #define N_ATAN(a)      _n_high_atan_avx512(a)
+    #define N_ATAN2(a,b)   _n_high_atan2_avx512(a, b)
+    #define N_SINH(a)      _n_high_sinh_avx512(a)
+    #define N_COSH(a)      _n_high_cosh_avx512(a)
+    #define N_TANH(a)      _n_high_tanh_avx512(a)
+    #define N_EXP(a)       _n_high_exp_avx512(a)
+    #define N_LOG(a)       _n_high_log_avx512(a)
+    #define N_LOG10(a)     _n_high_log10_avx512(a)
+    #define N_POW(a,b)     _n_pow_avx512(a, b)
+    #define N_SINCOS(a,s,c) _n_high_sincos_avx512(a, s, c)
+  #elif defined(NSIMD_AVX2)
     #define N_SIN(a)       _n_high_sin(a)
     #define N_COS(a)       _n_high_cos(a)
     #define N_TAN(a)       _n_high_tan(a)
