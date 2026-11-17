@@ -1,4 +1,4 @@
-﻿// NativeSIMD.h - cross-platform SIMD abstraction layer
+// NativeSIMD.h - cross-platform SIMD abstraction layer
 // Provides AVX2 / SSE4 / NEON / scalar fallback via unified interface
 // All loads use unaligned access (loadu), no alignment guarantees needed
 #pragma once
@@ -48,16 +48,27 @@ inline SimdWidth DetectSimdWidth() {
     SimdWidth result = SimdWidth::Scalar;
 #if defined(_MSC_VER) || defined(__GNUC__) || defined(__clang__)
     #if defined(_M_X64) || defined(__x86_64__) || defined(__i386__)
+        bool sse2 = false, avx = false, fma = false, avx2 = false, avx512f = false;
+    #if defined(_MSC_VER)
         int cpuInfo[4] = {0};
         __cpuid(cpuInfo, 1);
-        bool sse2 = (cpuInfo[3] & (1 << 26)) != 0;
-        bool avx = (cpuInfo[2] & (1 << 28)) != 0;
-        bool fma = (cpuInfo[2] & (1 << 12)) != 0;
+        sse2 = (cpuInfo[3] & (1 << 26)) != 0;
+        avx  = (cpuInfo[2] & (1 << 28)) != 0;
+        fma  = (cpuInfo[2] & (1 << 12)) != 0;
 
         int cpuInfo7[4] = {0};
         __cpuidex(cpuInfo7, 7, 0);
-        bool avx2 = (cpuInfo7[1] & (1 << 5)) != 0;
-        bool avx512f = (cpuInfo7[1] & (1 << 16)) != 0;
+        avx2    = (cpuInfo7[1] & (1 << 5)) != 0;
+        avx512f = (cpuInfo7[1] & (1 << 16)) != 0;
+    #else
+        // GCC/Clang：用 builtin 查询，免去内联汇编与 intrin.h 依赖
+        __builtin_cpu_init();
+        sse2    = __builtin_cpu_supports("sse2");
+        avx     = __builtin_cpu_supports("avx");
+        fma     = __builtin_cpu_supports("fma");
+        avx2    = __builtin_cpu_supports("avx2");
+        avx512f = __builtin_cpu_supports("avx512f");
+    #endif
 
         if (avx512f) result = SimdWidth::AVX512;
         else if (avx && fma && avx2) result = SimdWidth::AVX2;
