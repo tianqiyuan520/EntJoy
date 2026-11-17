@@ -33,7 +33,8 @@ endif()
 if(MSVC)
     set(ENTJOY_BASE_FLAGS /O2 /fp:precise)
 else()
-    set(ENTJOY_BASE_FLAGS -O2 -ffp-contract=off)
+    # -no-pie：Intel SDE 的 PIN 运行时在 PIE 可执行文件上会 SIGSEGV
+    set(ENTJOY_BASE_FLAGS -O2 -ffp-contract=off -fno-pie)
 endif()
 
 # 所有目标共用一套宏与编译选项，只有精度档不同
@@ -42,6 +43,9 @@ function(entjoy_math_target name source precision)
     target_compile_definitions(${name} PRIVATE ${ENTJOY_SIMD_DEFS} SIMD_MATH_PRECISION=${precision} NDEBUG NOMINMAX)
     target_compile_options(${name} PRIVATE ${ENTJOY_BASE_FLAGS} ${ENTJOY_SIMD_FLAGS})
     target_include_directories(${name} PRIVATE "${ENTJOY_NATIVE_DLL_DIR}")
+    if(NOT MSVC)
+        target_link_options(${name} PRIVATE -no-pie)
+    endif()
 endfunction()
 
 entjoy_math_target(MathUlpCheck      ulp.cpp   1)
