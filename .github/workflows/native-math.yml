@@ -107,7 +107,7 @@ jobs:
       - name: Configure
         run: |
           cmake -S tools/MathUlpCheck -B build-neon -DCMAKE_BUILD_TYPE=Release \
-            -DENTJOY_MATH_ISA=neon \
+            -DENTJOY_MATH_ISA=auto \
             -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
             -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++
       - name: Build
