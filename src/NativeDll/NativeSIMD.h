@@ -1707,7 +1707,7 @@ static inline n_mask n_cmp_ne_pd(n_double a, n_double b) {
 #elif defined(NSIMD_SSE4)
     return _mm_castpd_ps(_mm_cmpneq_pd(a, b));
 #elif defined(NSIMD_NEON)
-    return vreinterpretq_u32_u64(vmvnq_u64(vceqq_f64(a, b)));
+    return vmvnq_u32(vreinterpretq_u32_u64(vceqq_f64(a, b)));
 #else
     return a != b;
 #endif
