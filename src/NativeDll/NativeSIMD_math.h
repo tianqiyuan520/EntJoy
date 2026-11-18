@@ -848,6 +848,11 @@ static N_FORCEINLINE n_float _n_cos_neon(n_float d) {
   return res;
 }
 
+static N_FORCEINLINE void _n_sincos_neon(n_float x, n_float* s, n_float* c) {
+  *s = _n_sin_neon(x);
+  *c = _n_cos_neon(x);
+}
+
 static N_FORCEINLINE n_float _n_exp_neon(n_float d) {
   n_float n = vrndnq_f32(vmulq_f32(d, vdupq_n_f32(1.4426950408889634f)));
   n_int ni = vcvtq_s32_f32(n);
@@ -1681,7 +1686,7 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
     #define N_COSH(a)      _n_cosh_neon(a)
     #define N_TANH(a) _n_dom_tanh((a), _n_tanh_neon(a))
     #define N_POW(a,b)     _n_pow_neon(a, b)
-    #define N_SINCOS(a,s,c) do { (s) = _n_sin_neon(a); (c) = _n_cos_neon(a); } while (0)
+    #define N_SINCOS(a,s,c) _n_sincos_neon(a, s, c)
 #endif
   // Non-AVX2: #ifndef guards below provide per-lane scalar fallback
 
