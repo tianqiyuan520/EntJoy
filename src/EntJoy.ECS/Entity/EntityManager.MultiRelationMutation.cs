@@ -60,7 +60,7 @@ namespace EntJoy.ECS
             bool column = type.MultiRelationMaxSlots > 0;
             bool hasColumn = arch.Has(type.Type);
             int empty = column && hasColumn ? FindEmptyColumnSlot(source, type) : 0;
-            nint prepared = column && !hasColumn ? PrepareNewRelationColumn(arch, source, type) : 0;
+            PreparedChunk prepared = column && !hasColumn ? PrepareNewRelationColumn(arch, source, type) : PreparedChunk.None;
 
             HashSet<Entity> reverse = PrepareMultiRelationStorage(source, target, type, column,
                 out RelationListStore.RelationTargets list);
@@ -87,9 +87,9 @@ namespace EntJoy.ECS
         }
 
         // source 首次获得定长多槽列：预留槽位并让原型准备好本轮移除。
-        private nint PrepareNewRelationColumn(Archetype arch, Entity source, ComponentType type)
+        private PreparedChunk PrepareNewRelationColumn(Archetype arch, Entity source, ComponentType type)
         {
-            nint prepared = PrepareRelationSlot(GetComponentDestination(arch, type, true), source);
+            PreparedChunk prepared = PrepareRelationSlot(GetComponentDestination(arch, type, true), source);
             arch.PrepareEntityRemoval();
             return prepared;
         }
@@ -116,7 +116,7 @@ namespace EntJoy.ECS
 
         // 三条写入路径：托管列表追加、定长列的空槽、首次建列（整列初始化为空再写首槽）。
         private void WriteMultiEdge(Entity source, ComponentType type, RelationSlot slot,
-            bool column, bool hasColumn, int empty, nint prepared, RelationListStore.RelationTargets list)
+            bool column, bool hasColumn, int empty, PreparedChunk prepared, RelationListStore.RelationTargets list)
         {
             if (!column) { list.Add(slot); return; }
             if (hasColumn) { ((RelationSlot*)GetRelationValue(source, type))[empty] = slot; return; }

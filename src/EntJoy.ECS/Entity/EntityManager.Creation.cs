@@ -105,23 +105,23 @@ namespace EntJoy.ECS
         /// </summary>
         public unsafe void SetComponent<T>(Entity entity, T value) where T : struct
         {
-            CheckDisposed();
-            var componentType = ComponentTypeManager.GetComponentType(typeof(T));
-            if (componentType.IsRelation)
+            // 非关系类型收敛到 Set<T>：它自带 CheckDisposed、类型化直写与变更位处理，这里不再重复校验。
+            if (!ComponentTypeManager.IsRelationType<T>())
             {
-                CompleteRelationWriteJobs(entity, componentType);
-                using var changes = BeginRelationChanges();
-                using (EnterStructural())
-                {
-                    ValidateEntity(entity);
-                    if (!GetEntityInfoRef(entity.Id).Archetype.Has(componentType.Type))
-                        throw new InvalidOperationException($"Entity {entity} has no '{componentType.Type}' column.");
-                    SetSingleRelationCore(entity, componentType, (byte*)Unsafe.AsPointer(ref value), sizeof(T));
-                }
+                Set(entity, value);
                 return;
             }
-            // 非关系写入收敛到 Set<T>：类型化直写、变更位标记、Observable 与可销毁组件的处理都在那条路径上。
-            Set(entity, value);
+            CheckDisposed();
+            var componentType = ComponentTypeManager.GetComponentType<T>();
+            CompleteRelationWriteJobs(entity, componentType);
+            using var changes = BeginRelationChanges();
+            using (EnterStructural())
+            {
+                ValidateEntity(entity);
+                if (!GetEntityInfoRef(entity.Id).Archetype.Has(componentType.Type))
+                    throw new InvalidOperationException($"Entity {entity} has no '{componentType.Type}' column.");
+                SetSingleRelationCore(entity, componentType, (byte*)Unsafe.AsPointer(ref value), sizeof(T));
+            }
         }
 
         /// <summary>

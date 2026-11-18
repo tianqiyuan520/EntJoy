@@ -128,7 +128,7 @@ namespace EntJoy.ECS
         /// <paramref name="rawValue"/> 非 null 时走原始字节写入（值以字节为准，忽略 <paramref name="value"/>）。
         /// </summary>
         private unsafe void AddComponentRawCore(Entity entity, ComponentType metadata, object value, byte* rawValue = null, int rawSize = 0,
-            bool relationStorageOnly = false, nint preparedChunk = 0, Archetype knownTarget = null)
+            bool relationStorageOnly = false, PreparedChunk preparedChunk = default, Archetype knownTarget = null)
         {
             if (metadata.IsRelation && !relationStorageOnly)
             {
@@ -215,7 +215,7 @@ namespace EntJoy.ECS
         /// <summary>
         /// 移除组件核心（调用方必须已持有 _structuralLock）。
         /// </summary>
-        private unsafe void RemoveComponentRawCore(Entity entity, ComponentType metadata, bool relationStorageOnly = false, nint preparedChunk = 0, Archetype knownTarget = null)
+        private unsafe void RemoveComponentRawCore(Entity entity, ComponentType metadata, bool relationStorageOnly = false, PreparedChunk preparedChunk = default, Archetype knownTarget = null)
         {
             if (metadata.IsRelation && !relationStorageOnly)
             {
@@ -251,7 +251,7 @@ namespace EntJoy.ECS
             if (!IsAlive(entity)) return;
             var source = GetEntityInfoRef(entity.Id).Archetype;
             bool hasColumn = source.HasComponent(metadata);
-            nint destination = hasColumn ? PrepareRelationSlot(GetComponentDestination(source, metadata, false), entity) : 0;
+            PreparedChunk destination = hasColumn ? PrepareRelationSlot(GetComponentDestination(source, metadata, false), entity) : PreparedChunk.None;
             if (hasColumn) source.PrepareEntityRemoval();
             ClearMultiRelationshipsRaw(entity, metadata);
             if (hasColumn) RemoveComponentRawCore(entity, metadata, relationStorageOnly: true, preparedChunk: destination);
