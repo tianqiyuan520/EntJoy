@@ -33,6 +33,27 @@ static N_FORCEINLINE n_float _n_dom_log(n_float x, n_float r) {
   return n_blendv_ps(r, x, n_cmp_ne_ps(x, x));
 }
 
+static N_FORCEINLINE n_float _n_dom_pow(n_float x, n_float y, n_float r) {
+  // 特殊值按 IEEE：y = ±0 或 x = 1 -> 1；±inf 底数；零底数带符号
+  const n_float inf = n_set1_ps(INFINITY), zero = n_set1_ps(0.0f), one = n_set1_ps(1.0f);
+  n_mask yZero = n_cmp_eq_ps(y, zero), yPos = n_cmp_gt_ps(y, zero);
+  n_mask xInf = n_cmp_eq_ps(n_fabs_ps(x), inf), xZero = n_cmp_eq_ps(x, zero);
+  n_mask xNeg = n_or_mask(n_cmp_lt_ps(x, zero), n_cmp_lt_ps(n_div_ps(one, x), zero));
+  n_float xSign = n_blendv_ps(one, n_set1_ps(-1.0f), xNeg);
+  n_mask yInt = n_cmp_eq_ps(y, n_trunc_ps(y));
+  n_mask yOdd = n_and_mask(n_cmp_ne_ps(n_mul_ps(n_trunc_ps(n_mul_ps(y, n_set1_ps(0.5f))), n_set1_ps(2.0f)), y),
+                           n_cmp_lt_ps(n_fabs_ps(y), n_set1_ps(8388608.0f)));
+  n_float magInf = n_blendv_ps(zero, inf, yPos);
+  n_float magZero = n_blendv_ps(inf, zero, yPos);
+  // -inf 底数：整数指数按奇偶给 ±inf / ±0，非整数为 NaN
+  n_float negInf = n_mul_ps(xSign, n_blendv_ps(magInf, n_neg_ps(magInf), yOdd));
+  r = n_blendv_ps(r, n_blendv_ps(n_set1_ps(NAN), negInf, yInt), n_and_mask(xInf, xNeg));
+  r = n_blendv_ps(r, n_blendv_ps(magZero, n_neg_ps(magZero), n_and_mask(xNeg, yOdd)), xZero);
+  r = n_blendv_ps(r, n_blendv_ps(zero, inf, yPos), n_and_mask(xInf, n_not_mask(xNeg)));
+  r = n_blendv_ps(r, one, n_cmp_eq_ps(x, one));
+  r = n_blendv_ps(r, one, yZero);
+  return n_blendv_ps(r, n_set1_ps(NAN), n_or_mask(n_cmp_ne_ps(x, x), n_cmp_ne_ps(y, y)));
+}
 static N_FORCEINLINE n_float _n_dom_tanh(n_float x, n_float r) {
   n_float one = n_blendv_ps(n_set1_ps(1.0f), n_set1_ps(-1.0f), n_cmp_lt_ps(x, n_set1_ps(0.0f)));
   r = n_blendv_ps(r, one, n_cmp_gt_ps(n_fabs_ps(x), n_set1_ps(20.0f)));
@@ -40,9 +61,24 @@ static N_FORCEINLINE n_float _n_dom_tanh(n_float x, n_float r) {
 }
 
 static N_FORCEINLINE n_float _n_dom_atan2(n_float y, n_float x, n_float r) {
-  n_float sz = n_mul_ps(y, n_set1_ps(0.0f));   // y 的带符号零
-  n_mask cond = n_and_mask(n_cmp_eq_ps(y, n_set1_ps(0.0f)), n_cmp_gt_ps(x, n_set1_ps(0.0f)));
-  return n_blendv_ps(r, sz, cond);
+  // ±inf 组合与零：atan 内核只覆盖有限输入，这里补齐标准定义
+  const n_float inf = n_set1_ps(INFINITY), zero = n_set1_ps(0.0f);
+  const n_float quarter = n_set1_ps(0.7853981633974483f);
+  const n_float half = n_set1_ps(1.5707963267948966f);
+  const n_float pi = n_set1_ps(3.14159265358979323846f);
+  n_mask yInf = n_cmp_eq_ps(n_fabs_ps(y), inf), xInf = n_cmp_eq_ps(n_fabs_ps(x), inf);
+  n_mask yNeg = n_or_mask(n_cmp_lt_ps(y, zero), n_cmp_lt_ps(n_div_ps(n_set1_ps(1.0f), y), zero)), xNeg = n_cmp_lt_ps(x, zero);
+  n_float ySign = n_blendv_ps(n_set1_ps(1.0f), n_set1_ps(-1.0f), yNeg);
+  // y 无穷、x 有限：±π/2；两者都无穷：±π/4 或 ±3π/4；x 无穷、y 有限：±0 或 ±π
+  r = n_blendv_ps(r, n_mul_ps(ySign, half), n_and_mask(yInf, n_not_mask(xInf)));
+  r = n_blendv_ps(r, n_mul_ps(ySign, n_blendv_ps(quarter, n_mul_ps(n_set1_ps(3.0f), quarter), xNeg)),
+                  n_and_mask(yInf, xInf));
+  r = n_blendv_ps(r, n_mul_ps(ySign, n_blendv_ps(zero, pi, xNeg)), n_and_mask(xInf, n_not_mask(yInf)));
+  // y = ±0 且 x > 0：带符号零
+  // y = ±0：x > 0 给带符号零，x < 0 给带符号 π
+  n_mask yZeroM = n_cmp_eq_ps(y, zero);
+  r = n_blendv_ps(r, n_mul_ps(ySign, pi), n_and_mask(yZeroM, n_cmp_lt_ps(x, zero)));
+  return n_blendv_ps(r, n_mul_ps(y, zero), n_and_mask(yZeroM, n_cmp_gt_ps(x, zero)));
 }
 
 // 奇函数在 ±0 处的结果等于输入（保留 -0）；sin/tan/atan/asin/sinh/tanh 共用。
@@ -1634,7 +1670,7 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
     #define N_LOG(a) _n_dom_log((a), _n_log_avx512(a))
     #define N_EXP(a) _n_dom_exp((a), _n_exp_avx512(a))
     #define N_LOG10(a)   _mm512_mul_ps(N_LOG(a), _mm512_set1_ps(0.4342944819032518f))
-    #define N_POW(a,b)   _n_pow_avx512(a, b)
+    #define N_POW(a,b) _n_dom_pow((a), (b), _n_pow_avx512(a, b))
   #define N_TAN(a) _n_dom_odd_zero((a), _n_tan_big((a), _n_tan_avx512(a)))
   #define N_ASIN(a) _n_dom_odd_zero((a), _n_dom_asin((a), _n_asin_avx512(a)))
   #define N_ACOS(a) _n_dom_acos((a), _n_acos_avx512(a))
@@ -1682,7 +1718,7 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
     #define N_SINH(a) _n_dom_odd_zero((a), _n_sinh_ps(a))
     #define N_COSH(a)      _n_cosh_ps(a)
     #define N_TANH(a) _n_dom_odd_zero((a), _n_dom_tanh((a), _n_tanh_ps(a)))
-    #define N_POW(a,b)     _n_pow_avx2_ps(a, b)
+    #define N_POW(a,b) _n_dom_pow((a), (b), _n_pow_avx2_ps(a, b))
     #define N_SINCOS(a,s,c) _n_sincos_ps(a, s, c)
 #elif defined(NSIMD_NEON) && defined(__aarch64__)
     #define N_TAN(a) _n_dom_odd_zero((a), _n_tan_big((a), vdivq_f32(_n_sin_neon(a), _n_cos_neon(a))))
@@ -1693,7 +1729,7 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
     #define N_SINH(a) _n_dom_odd_zero((a), _n_sinh_neon(a))
     #define N_COSH(a)      _n_cosh_neon(a)
     #define N_TANH(a) _n_dom_odd_zero((a), _n_dom_tanh((a), _n_tanh_neon(a)))
-    #define N_POW(a,b)     _n_pow_neon(a, b)
+    #define N_POW(a,b) _n_dom_pow((a), (b), _n_pow_neon(a, b))
     #define N_SINCOS(a,s,c) _n_sincos_neon(a, s, c)
 #endif
   // Non-AVX2: #ifndef guards below provide per-lane scalar fallback
@@ -1717,7 +1753,7 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
     #define N_EXP(a) _n_dom_exp((a), _n_high_exp_avx512(a))
     #define N_LOG(a) _n_dom_log((a), _n_high_log_avx512(a))
     #define N_LOG10(a)     _n_high_log10_avx512(a)
-    #define N_POW(a,b)     _n_pow_avx512(a, b)
+    #define N_POW(a,b) _n_dom_pow((a), (b), _n_pow_avx512(a, b))
     #define N_SINCOS(a,s,c) _n_high_sincos_avx512(a, s, c)
   #elif defined(NSIMD_SSE4)
     // SSE4.1 无 FMA、只有 4 lane：double lane 方案实测比 libm 慢（0.32–0.79x），
@@ -1768,7 +1804,7 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
     #define N_LOG(a) _n_dom_log((a), _n_high_log(a))
     #define N_LOG10(a)     _n_high_log10(a)
 #if !defined(NSIMD_AVX512)
-#define N_POW(a,b)     _n_pow_avx2_ps(a, b)
+#define N_POW(a,b) _n_dom_pow((a), (b), _n_pow_avx2_ps(a, b))
 #endif
     #define N_SINCOS(a,s,c) _n_high_sincos(a, s, c)
   #endif
@@ -1927,7 +1963,7 @@ static N_FORCEINLINE n_float _n_pow_fallback(n_float a, n_float b) {
   for (int i = 0; i < NSIMD_WIDTH; i++) la[i] = ::powf(la[i], lb[i]);
   return n_load_ps(la);
 }
-#define N_POW(a,b) _n_pow_fallback(a,b)
+#define N_POW(a,b) _n_dom_pow((a), (b), _n_pow_fallback(a,b))
 #endif
 
 // ================================================================
@@ -2197,3 +2233,4 @@ static N_FORCEINLINE n_double _n_cos_pd_fallback(n_double a) {
 static N_FORCEINLINE n_double n_sin_pd(n_double a)     { return N_SIN_PD(a); }
 static N_FORCEINLINE n_double n_cos_pd(n_double a)     { return N_COS_PD(a); }
 // sqrt_pd is already defined in NativeSIMD.h as n_sqrt_pd
+
