@@ -14,7 +14,9 @@
 #endif
 
 // ================================================================
-// 定义域策略（通解）：所有内核返回前统一调用，避免每个 ISA / 精度档各写一份 blend。
+// 定义域策略：所有入口在宏层统一套用，内核只算数学主体。
+// 两类「看起来重复」的代码不要删：exp 的 ±溢出饱和与 tanh 的 ±88 夹取属区间语义
+// （float 的 2^n 指数域限制），删掉会让 sinh/cosh 在 |x| 很大时算错。
 //   exp  : +inf -> +inf，-inf -> 0，NaN 透传
 //   log  : 0 -> -inf，负数 -> NaN，+inf -> +inf，NaN 透传
 //   tanh : |x| 超过饱和点 -> 带符号的 1，NaN 透传
@@ -275,11 +277,7 @@ static N_FORCEINLINE __m256 _n_log_avx2(__m256 d) {
 
   __m256 res = _mm256_blendv_ps(wide, near, _mm256_cmp_ps(at, _mm256_set1_ps(0.25f), _CMP_LE_OQ));
   // 定义域：0 -> -inf，负数 -> NaN，+inf -> +inf
-  res = _mm256_blendv_ps(res, _mm256_set1_ps(-INFINITY), _n256_eq(d, _mm256_setzero_ps()));
-  res = _mm256_blendv_ps(res, _mm256_set1_ps(NAN), _n256_lt(d, _mm256_setzero_ps()));
-  res = _mm256_blendv_ps(res, _mm256_set1_ps(INFINITY), _n256_eq(d, _mm256_set1_ps(INFINITY)));
   // NaN 必须原样透传：NaN 的指数域是 255，按位取尾数会算出 89.1 这样的有限值
-  res = _mm256_blendv_ps(res, d, _mm256_cmp_ps(d, d, _CMP_UNORD_Q));
   return _mm256_sub_ps(res, _mm256_and_ps(sub, _mm256_set1_ps(16.635532333438687f)));
 }
 static N_FORCEINLINE __m256 _n_exp_avx2(__m256 d) {
@@ -613,10 +611,6 @@ static N_FORCEINLINE __m256 _n_high_log(__m256 x) {
   __m128 rl = _mm256_cvtpd_ps(lo), rh = _mm256_cvtpd_ps(hi);
   __m256 res = _mm256_insertf128_ps(_mm256_castps128_ps256(rl), rh, 1);
   // 定义域：0 -> -inf，负数 -> NaN，+inf -> +inf，NaN 透传；次正规补回 24*ln2
-  res = _mm256_blendv_ps(res, _mm256_set1_ps(-INFINITY), _n256_eq(x, _mm256_setzero_ps()));
-  res = _mm256_blendv_ps(res, _mm256_set1_ps(NAN), _n256_lt(x, _mm256_setzero_ps()));
-  res = _mm256_blendv_ps(res, _mm256_set1_ps(INFINITY), _n256_eq(x, _mm256_set1_ps(INFINITY)));
-  res = _mm256_blendv_ps(res, x, _mm256_cmp_ps(x, x, _CMP_UNORD_Q));
   __m256 corr = _mm256_and_ps(subM, _mm256_set1_ps(16.635532333438687f));
   return _mm256_sub_ps(res, corr);
 }
@@ -968,9 +962,6 @@ static N_FORCEINLINE n_float _n_log_neon(n_float d) {
   wide = vfmaq_f32(wide, x, p);
   n_float res = vbslq_f32(vcleq_f32(at, vdupq_n_f32(0.25f)), near, wide);
   // 定义域：0 -> -inf，负数 -> NaN，+inf -> +inf
-  res = vbslq_f32(vceqq_f32(d, vdupq_n_f32(0.0f)), vdupq_n_f32(-INFINITY), res);
-  res = vbslq_f32(vcltq_f32(d, vdupq_n_f32(0.0f)), vdupq_n_f32(NAN), res);
-  res = vbslq_f32(vceqq_f32(d, vdupq_n_f32(INFINITY)), vdupq_n_f32(INFINITY), res);
   // NaN 必须原样透传：NaN 的指数域是 255，按位取尾数会算出有限值
   res = vbslq_f32(vmvnq_u32(vceqq_f32(d, d)), d, res);
   return vsubq_f32(res, vbslq_f32(sub, vdupq_n_f32(16.635532333438687f), vdupq_n_f32(0.0f)));
@@ -1558,11 +1549,7 @@ static N_FORCEINLINE __m128 _n_log_sse41(__m128 d) {
   wide = _n_madd_ps(wide, x, p);
   __m128 res = _n_blend_sse41(wide, near, _mm_cmple_ps(at, _mm_set1_ps(0.25f)));
   // 定义域：0 -> -inf，负数 -> NaN，+inf -> +inf
-  res = _n_blend_sse41(res, _mm_set1_ps(-INFINITY), _mm_cmpeq_ps(d, _mm_setzero_ps()));
-  res = _n_blend_sse41(res, _mm_set1_ps(NAN), _mm_cmplt_ps(d, _mm_setzero_ps()));
-  res = _n_blend_sse41(res, _mm_set1_ps(INFINITY), _mm_cmpeq_ps(d, _mm_set1_ps(INFINITY)));
   // NaN 必须原样透传：NaN 的指数域是 255，按位取尾数会算出有限值
-  res = _n_blend_sse41(res, d, _mm_cmpunord_ps(d, d));
   return _mm_sub_ps(res, _mm_and_ps(sub, _mm_set1_ps(16.635532333438687f)));
 }
 
@@ -1758,7 +1745,7 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
     #define N_TANH(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_dom_tanh((_v), _n_high_tanh_avx512(_v))); }((a))
     #define N_EXP(a) [&](n_float _v) { return _n_dom_exp((_v), _n_high_exp_avx512(_v)); }((a))
     #define N_LOG(a) [&](n_float _v) { return _n_dom_log((_v), _n_high_log_avx512(_v)); }((a))
-    #define N_LOG10(a) [&](n_float _v) { return _n_high_log10_avx512(_v); }((a))
+    #define N_LOG10(a) [&](n_float _v) { return _n_dom_log((_v), [&](n_float _v) { return _n_high_log10_avx512(_v); }((_v))); }((a))
     #define N_POW(a,b) [&](n_float _va, n_float _vb) { return _n_dom_pow((_va), (_vb), _n_pow_avx512(_va, _vb)); }((a), (b))
     #define N_SINCOS(a,s,c) _n_high_sincos_avx512(a, s, c)
   #elif defined(NSIMD_SSE4)
@@ -1776,7 +1763,7 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
     #define N_TANH(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_dom_tanh((_v), _n_tanh_sse41(_v))); }((a))
     #define N_EXP(a) [&](n_float _v) { return _n_dom_exp((_v), _n_exp_sse41(_v)); }((a))
     #define N_LOG(a) [&](n_float _v) { return _n_dom_log((_v), _n_log_sse41(_v)); }((a))
-    #define N_LOG10(a) [&](n_float _v) { return _n_log10_sse41(_v); }((a))
+    #define N_LOG10(a) [&](n_float _v) { return _n_dom_log((_v), [&](n_float _v) { return _n_log10_sse41(_v); }((_v))); }((a))
   // pow 在 SSE4 上走 libm 回退（无 FMA 时 log2/exp2 精度不足）
     #define N_SINCOS(a,s,c) _n_sincos_sse41(a, s, c)
   #elif defined(NSIMD_NEON) && defined(__aarch64__)
@@ -1792,7 +1779,7 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
     #define N_TANH(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_dom_tanh((_v), _n_high_tanh_neon(_v))); }((a))
     #define N_EXP(a) [&](n_float _v) { return _n_dom_exp((_v), _n_high_exp_neon(_v)); }((a))
     #define N_LOG(a) [&](n_float _v) { return _n_dom_log((_v), _n_high_log_neon(_v)); }((a))
-    #define N_LOG10(a) [&](n_float _v) { return _n_high_log10_neon(_v); }((a))
+    #define N_LOG10(a) [&](n_float _v) { return _n_dom_log((_v), [&](n_float _v) { return _n_high_log10_neon(_v); }((_v))); }((a))
     // pow 在 NEON High 上走 libm 回退：double lane 版尚未处理负底数/零底数定义域
     #define N_SINCOS(a,s,c) _n_high_sincos_neon(a, s, c)
   #elif defined(NSIMD_AVX2)
@@ -1808,7 +1795,7 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
     #define N_TANH(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_dom_tanh((_v), _n_high_tanh(_v))); }((a))
     #define N_EXP(a) [&](n_float _v) { return _n_dom_exp((_v), _n_high_exp(_v)); }((a))
     #define N_LOG(a) [&](n_float _v) { return _n_dom_log((_v), _n_high_log(_v)); }((a))
-    #define N_LOG10(a) [&](n_float _v) { return _n_high_log10(_v); }((a))
+    #define N_LOG10(a) [&](n_float _v) { return _n_dom_log((_v), [&](n_float _v) { return _n_high_log10(_v); }((_v))); }((a))
 #if !defined(NSIMD_AVX512)
 #define N_POW(a,b) [&](n_float _va, n_float _vb) { return _n_dom_pow((_va), (_vb), _n_pow_avx2_ps(_va, _vb)); }((a), (b))
 #endif
@@ -1959,7 +1946,7 @@ static N_FORCEINLINE n_float _n_log10_fallback(n_float a) {
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::log10f(lane[i]);
   return n_load_ps(lane);
 }
-#define N_LOG10(a) [&](n_float _v) { return _n_log10_fallback(_v); }((a))
+#define N_LOG10(a) [&](n_float _v) { return _n_dom_log((_v), [&](n_float _v) { return _n_log10_fallback(_v); }((_v))); }((a))
 #endif
 
 #ifndef N_POW
