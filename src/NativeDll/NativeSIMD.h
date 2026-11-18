@@ -1348,13 +1348,8 @@ static inline int n_all_zero(n_mask mask) {
 #elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_testz_ps(mask, mask);
 #elif defined(NSIMD_SSE4)
-#if defined(__SSE4_1__)
-    return _mm_testz_ps(mask, mask);
-#else
-    // 无 SSE4.1 时用 SSE2：掩码 lane 只会是全 0 或全 1，但 -0.0 需要按位判零
-    return _mm_movemask_ps(_mm_cmpeq_ps(_mm_and_ps(mask, mask), _mm_setzero_ps())) == 0xF;
-#endif
-  return _mm_movemask_ps(_mm_cmpeq_ps(mask, _mm_setzero_ps())) == 0xF;
+    // 掩码 lane 只会是全 1（真）或全 0（假），取符号位即可；纯 SSE2，不依赖 __SSE4_1__
+    return _mm_movemask_ps(mask) == 0;
 #elif defined(NSIMD_NEON)
     uint32x2_t lo = vget_low_u32(mask);
     uint32x2_t hi = vget_high_u32(mask);

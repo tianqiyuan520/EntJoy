@@ -1205,7 +1205,7 @@ static N_FORCEINLINE float64x2_t _n_log2d_neon(float64x2_t d) {
   res = vbslq_f64(vceqq_f64(d, vdupq_n_f64(0.0)), vdupq_n_f64(-INFINITY), res);
   res = vbslq_f64(vcltq_f64(d, vdupq_n_f64(0.0)), vdupq_n_f64(NAN), res);
   res = vbslq_f64(vceqq_f64(d, vdupq_n_f64(INFINITY)), vdupq_n_f64(INFINITY), res);
-  return vbslq_f64(vmvnq_u64(vceqq_f64(d, d)), d, res);
+  return vbslq_f64(vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_f64(d, d)))), d, res);
 }
 
 static N_FORCEINLINE float64x2_t _n_log2d_base2_neon(float64x2_t d) {
