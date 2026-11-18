@@ -1250,11 +1250,7 @@ static N_FORCEINLINE float64x2_t _n_log2d_neon(float64x2_t d) {
   float64x2_t wide = vmulq_f64(ef, vdupq_n_f64(0.69314718055994530942));
   wide = vfmaq_f64(wide, vmulq_f64(vmulq_f64(x, p), vdupq_n_f64(2.0)), vdupq_n_f64(1.0));
   float64x2_t res = vbslq_f64(vcleq_f64(at, vdupq_n_f64(0.25)), near, wide);
-  // 定义域：0 -> -inf，负数 -> NaN，+inf -> +inf，NaN 透传
-  res = vbslq_f64(vceqq_f64(d, vdupq_n_f64(0.0)), vdupq_n_f64(-INFINITY), res);
-  res = vbslq_f64(vcltq_f64(d, vdupq_n_f64(0.0)), vdupq_n_f64(NAN), res);
-  res = vbslq_f64(vceqq_f64(d, vdupq_n_f64(INFINITY)), vdupq_n_f64(INFINITY), res);
-  return vbslq_f64(vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_f64(d, d)))), d, res);
+  return res;
 }
 
 static N_FORCEINLINE float64x2_t _n_log2d_base2_neon(float64x2_t d) {
