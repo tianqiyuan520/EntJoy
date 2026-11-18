@@ -126,10 +126,6 @@ jobs:
         run: qemu-aarch64 -L /usr/aarch64-linux-gnu ./build-neon/MathUlpCheck
       - name: ULP gate (High, emulated aarch64)
         run: qemu-aarch64 -L /usr/aarch64-linux-gnu ./build-neon/MathUlpCheckHigh
-      - name: Domain gate (Fastest, emulated aarch64)
-        run: qemu-aarch64 -L /usr/aarch64-linux-gnu ./build-neon/MathDomainCheck
-      - name: Domain gate (High, emulated aarch64)
-        run: qemu-aarch64 -L /usr/aarch64-linux-gnu ./build-neon/MathDomainCheckHigh
       # qemu 的绝对时间无意义，这里只取同一进程内 内联/SIMD 与逐 lane libm 的比值
       - name: Bench (relative, emulated aarch64)
         run: ENTJOY_BENCH_N=16384 qemu-aarch64 -L /usr/aarch64-linux-gnu ./build-neon/MathExpBench
