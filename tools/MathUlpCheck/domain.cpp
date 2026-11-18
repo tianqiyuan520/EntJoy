@@ -16,7 +16,6 @@ namespace
     {
         ++g_checks;
         bool ok;
-        if (std::fabs((double)in) > 1e30 && std::strcmp(name, "tan") == 0) return;   // 超大参数需要 Payne-Hanek 归约，不在此范围
         if (std::isnan(ref)) ok = std::isnan(out) != 0;
         else if (std::isinf(ref)) ok = std::isinf(out) != 0 && (std::signbit(ref) == std::signbit(out));
         else if (ref == 0.0f) ok = out == 0.0f && (!zeroSign || std::signbit(ref) == std::signbit(out));
@@ -79,15 +78,15 @@ int main()
     Unary("log",   [](n_float v) { return N_LOG(v); },   RefLog,   special, nSpecial);
     Unary("log10", [](n_float v) { return N_LOG10(v); }, RefLog10, special, nSpecial);
     Unary("exp",   [](n_float v) { return N_EXP(v); },   RefExp,   special, nSpecial);
-    Unary("tanh",  [](n_float v) { return N_TANH(v); },  RefTanh,  special, nSpecial, false);
-    Unary("sinh",  [](n_float v) { return N_SINH(v); },  RefSinh,  special, nSpecial, false);
-    Unary("cosh",  [](n_float v) { return N_COSH(v); },  RefCosh,  special, nSpecial, false);
-    Unary("tan",   [](n_float v) { return N_TAN(v); },   RefTan,   special, nSpecial, false);
-    Unary("atan",  [](n_float v) { return N_ATAN(v); },  RefAtan,  special, nSpecial, false);
+    Unary("tanh",  [](n_float v) { return N_TANH(v); },  RefTanh,  special, nSpecial);
+    Unary("sinh",  [](n_float v) { return N_SINH(v); },  RefSinh,  special, nSpecial);
+    Unary("cosh",  [](n_float v) { return N_COSH(v); },  RefCosh,  special, nSpecial);
+    Unary("tan",   [](n_float v) { return N_TAN(v); },   RefTan,   special, nSpecial);
+    Unary("atan",  [](n_float v) { return N_ATAN(v); },  RefAtan,  special, nSpecial);
 
     const float unit[] = { -1.0f, -0.5f, 0.0f, -0.0f, 0.5f, 1.0f };
-    Unary("asin", [](n_float v) { return N_ASIN(v); }, RefAsin, unit, 6, false);
-    Unary("acos", [](n_float v) { return N_ACOS(v); }, RefAcos, unit, 6, false);
+    Unary("asin", [](n_float v) { return N_ASIN(v); }, RefAsin, unit, 6);
+    Unary("acos", [](n_float v) { return N_ACOS(v); }, RefAcos, unit, 6);
 
     const float pb[] = { -2.0f, -2.0f, -2.0f, -2.0f, -1.0f, -1.0f, -0.0f, -0.0f, 0.0f, 0.0f, 2.0f, 0.0f, -3.0f, 3.0f };
     const float pe[] = { 3.0f, -3.0f, 2.0f, 2.5f, 1e30f, 2.0f, 3.0f, -3.0f, 2.0f, -2.0f, 0.5f, 0.0f, 7.0f, 0.0f };
