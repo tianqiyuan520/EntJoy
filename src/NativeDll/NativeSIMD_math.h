@@ -170,6 +170,27 @@ static N_FORCEINLINE __m256 _n_reduce_pio2_avx2(__m256 d, __m256i* qOut) {
   return _mm256_insertf128_ps(_mm256_castps128_ps256(rf_lo), rf_hi, 1);
 }
 
+// 单精度 3 段 Cody-Waite 归约：|x| <= 6000 时 q < 2^12，pio2_hi 低 12 位尾数为零，
+// 因此 q*pio2_hi 精确，r 的绝对误差 < 1 ulp。免去 double 域往返（12 条 double 指令 + 4 条转换）。
+static N_FORCEINLINE __m256 _n_reduce_pio2_ps_avx2(__m256 d, __m256i* qOut) {
+  const __m256 two_over_pi = _mm256_set1_ps(0.636619772f);
+  const __m256 pio2_hi = _mm256_set1_ps(1.5703125f);
+  const __m256 pio2_lo = _mm256_set1_ps(4.83826792e-04f);
+  const __m256 pio2_lo2 = _mm256_set1_ps(2.56328292e-12f);
+  __m256 qf = _mm256_round_ps(_mm256_mul_ps(d, two_over_pi), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+  *qOut = _mm256_cvtps_epi32(qf);
+  __m256 r = _mm256_fnmadd_ps(qf, pio2_hi, d);
+  r = _mm256_fnmadd_ps(qf, pio2_lo, r);
+  r = _mm256_fnmadd_ps(qf, pio2_lo2, r);
+  return r;
+}
+
+// 全部 lane 都在单精度归约的安全范围内才走快路径，否则整条走精确路径。
+static N_FORCEINLINE bool _n_all_small_avx2(__m256 d, float limit) {
+  __m256 a = _mm256_and_ps(d, _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));
+  return _mm256_movemask_ps(_mm256_cmp_ps(a, _mm256_set1_ps(limit), _CMP_GT_OQ)) == 0;
+}
+
 static N_FORCEINLINE __m256 _n_sin_poly_avx2(__m256 r) {
   __m256 s = _mm256_mul_ps(r, r);
   __m256 p = _mm256_set1_ps(2.6083159809786593541503e-06f);
@@ -189,6 +210,17 @@ static N_FORCEINLINE __m256 _n_cos_poly_avx2(__m256 r) {
 }
 
 static N_FORCEINLINE __m256 _n_sin_avx2(__m256 d) {
+  if (_n_all_small_avx2(d, 6000.0f)) {
+    __m256i qs;
+    __m256 rs = _n_reduce_pio2_ps_avx2(d, &qs);
+    __m256 s_sin = _n_sin_poly_avx2(rs);
+    __m256 s_cos = _n_cos_poly_avx2(rs);
+    __m256 ev = _mm256_castsi256_ps(_mm256_cmpeq_epi32(_mm256_and_si256(qs, _mm256_set1_epi32(1)),
+                                                       _mm256_setzero_si256()));
+    __m256 sv = _mm256_blendv_ps(s_cos, s_sin, ev);
+    __m256i fl = _mm256_and_si256(qs, _mm256_set1_epi32(2));
+    return _mm256_xor_ps(sv, _mm256_castsi256_ps(_mm256_slli_epi32(fl, 30)));
+  }
   __m256i qi;
   __m256 r = _n_reduce_pio2_avx2(d, &qi);
   __m256 u_sin = _n_sin_poly_avx2(r);
@@ -213,6 +245,17 @@ static N_FORCEINLINE __m256 _n_sin_avx2(__m256 d) {
 }
 
 static N_FORCEINLINE __m256 _n_cos_avx2(__m256 d) {
+  if (_n_all_small_avx2(d, 6000.0f)) {
+    __m256i qs;
+    __m256 rs = _n_reduce_pio2_ps_avx2(d, &qs);
+    __m256 s_sin = _n_sin_poly_avx2(rs);
+    __m256 s_cos = _n_cos_poly_avx2(rs);
+    __m256 ev = _mm256_castsi256_ps(_mm256_cmpeq_epi32(_mm256_and_si256(qs, _mm256_set1_epi32(1)),
+                                                       _mm256_setzero_si256()));
+    __m256 sv = _mm256_blendv_ps(s_sin, s_cos, ev);
+    __m256i fl = _mm256_and_si256(_mm256_add_epi32(qs, _mm256_set1_epi32(1)), _mm256_set1_epi32(2));
+    return _mm256_xor_ps(sv, _mm256_castsi256_ps(_mm256_slli_epi32(fl, 30)));
+  }
   __m256i qi;
   __m256 r = _n_reduce_pio2_avx2(d, &qi);
   __m256 u_sin = _n_sin_poly_avx2(r);
