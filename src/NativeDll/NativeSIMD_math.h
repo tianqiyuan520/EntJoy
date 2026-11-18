@@ -67,7 +67,10 @@ static N_FORCEINLINE n_float _n_dom_atan2(n_float y, n_float x, n_float r) {
   const n_float half = n_set1_ps(1.5707963267948966f);
   const n_float pi = n_set1_ps(3.14159265358979323846f);
   n_mask yInf = n_cmp_eq_ps(n_fabs_ps(y), inf), xInf = n_cmp_eq_ps(n_fabs_ps(x), inf);
-  n_mask yNeg = n_or_mask(n_cmp_lt_ps(y, zero), n_cmp_lt_ps(n_div_ps(n_set1_ps(1.0f), y), zero)), xNeg = n_cmp_lt_ps(x, zero);
+  n_float rx = n_div_ps(n_set1_ps(1.0f), x);
+  n_mask yNeg = n_or_mask(n_cmp_lt_ps(y, zero), n_cmp_lt_ps(n_div_ps(n_set1_ps(1.0f), y), zero));
+  n_mask xNeg = n_or_mask(n_cmp_lt_ps(x, zero), n_cmp_lt_ps(rx, zero));
+  n_mask xPos = n_or_mask(n_cmp_gt_ps(x, zero), n_cmp_gt_ps(rx, zero));
   n_float ySign = n_blendv_ps(n_set1_ps(1.0f), n_set1_ps(-1.0f), yNeg);
   // y 无穷、x 有限：±π/2；两者都无穷：±π/4 或 ±3π/4；x 无穷、y 有限：±0 或 ±π
   r = n_blendv_ps(r, n_mul_ps(ySign, half), n_and_mask(yInf, n_not_mask(xInf)));
@@ -77,8 +80,8 @@ static N_FORCEINLINE n_float _n_dom_atan2(n_float y, n_float x, n_float r) {
   // y = ±0 且 x > 0：带符号零
   // y = ±0：x > 0 给带符号零，x < 0 给带符号 π
   n_mask yZeroM = n_cmp_eq_ps(y, zero);
-  r = n_blendv_ps(r, n_mul_ps(ySign, pi), n_and_mask(yZeroM, n_cmp_lt_ps(x, zero)));
-  return n_blendv_ps(r, n_mul_ps(y, zero), n_and_mask(yZeroM, n_cmp_gt_ps(x, zero)));
+  r = n_blendv_ps(r, n_mul_ps(ySign, pi), n_and_mask(yZeroM, xNeg));
+  return n_blendv_ps(r, n_mul_ps(y, zero), n_and_mask(yZeroM, xPos));
 }
 
 // 奇函数在 ±0 处的结果等于输入（保留 -0）；sin/tan/atan/asin/sinh/tanh 共用。

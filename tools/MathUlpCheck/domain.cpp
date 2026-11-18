@@ -92,9 +92,11 @@ int main()
     const float pe[] = { 3.0f, -3.0f, 2.0f, 2.5f, 1e30f, 2.0f, 3.0f, -3.0f, 2.0f, -2.0f, 0.5f, 0.0f, 7.0f, 0.0f };
     Binary("pow", [](n_float a, n_float b) { return N_POW(a, b); }, RefPow, pb, pe, 14);
 
-    const float ya[] = { 0.0f, -0.0f, 1.0f, -1.0f, INFINITY, -INFINITY, 0.0f };
-    const float xa[] = { 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, INFINITY };
-    Binary("atan2", [](n_float a, n_float b) { return N_ATAN2(a, b); }, RefAtan2, ya, xa, 7);
+    const float ya[] = { 0.0f, -0.0f, 1.0f, -1.0f, INFINITY, -INFINITY, 0.0f,
+                          0.0f, -0.0f, 0.0f, -0.0f, INFINITY, INFINITY, -INFINITY };
+    const float xa[] = { 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, INFINITY,
+                         0.0f, 0.0f, -0.0f, -0.0f, INFINITY, -INFINITY, INFINITY };
+    Binary("atan2", [](n_float a, n_float b) { return N_ATAN2(a, b); }, RefAtan2, ya, xa, 14);
 
     // exp 的 2^128 尾段：内核把指数拆成两段因子，这一段是溢出边界
     const float expBand[] = { 88.0f, 88.3f, 88.5f, 88.72f, 88.73f };
