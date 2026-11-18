@@ -59,6 +59,8 @@ namespace
     float RefSinh(float x)  { return (float)std::sinh((double)x); }
     float RefCosh(float x)  { return (float)std::cosh((double)x); }
     float RefTan(float x)   { return (float)std::tan((double)x); }
+    float RefSin(float x)   { return (float)std::sin((double)x); }
+    float RefCos(float x)   { return (float)std::cos((double)x); }
     float RefAtan(float x)  { return (float)std::atan((double)x); }
     float RefAsin(float x)  { return (float)std::asin((double)x); }
     float RefAcos(float x)  { return (float)std::acos((double)x); }
@@ -94,6 +96,22 @@ int main()
     const float ya[] = { 0.0f, -0.0f, 1.0f, -1.0f, INFINITY, -INFINITY, 0.0f };
     const float xa[] = { 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, INFINITY };
     Binary("atan2", [](n_float a, n_float b) { return N_ATAN2(a, b); }, RefAtan2, ya, xa, 7);
+
+    // N_SINCOS 一次算两路，必须与单独调用一致
+    {
+        alignas(64) float in[NSIMD_WIDTH], sOut[NSIMD_WIDTH], cOut[NSIMD_WIDTH];
+        const float xs[] = { 0.0f, 0.5f, -0.5f, 1.5707964f, 3.1415927f, -3.1415927f };
+        for (float x : xs)
+        {
+            for (int k = 0; k < NSIMD_WIDTH; k++) in[k] = x;
+            n_float sv, cv;
+            N_SINCOS(n_load_ps(in), &sv, &cv);
+            n_store_ps(sOut, sv);
+            n_store_ps(cOut, cv);
+            Check("sincos.sin", x, sOut[0], RefSin(x), false);
+            Check("sincos.cos", x, cOut[0], RefCos(x), false);
+        }
+    }
 
     std::printf("%d 项检查，%s\n", g_checks, g_failed ? "FAIL" : "PASS");
     return g_failed ? 1 : 0;

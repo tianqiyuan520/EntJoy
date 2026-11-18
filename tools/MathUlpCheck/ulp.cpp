@@ -194,6 +194,7 @@ int main()
     Unary("log: 近 1 段 [0.75, 1.25]", "log", [](n_float v) { return N_LOG(v); }, std::log, 0.75, 1.25, 400000);
     Unary("exp: [-87, 88]", "exp", [](n_float v) { return N_EXP(v); }, std::exp, -87.0, 88.0, 400000);
 
+    Unary("tan: [1e3, 1e6]", "tan", [](n_float v) { return N_TAN(v); }, std::tan, 1e3, 1e6, 200000);
     Unary("tan: [-1.5, 1.5]", "tan", [](n_float v) { return N_TAN(v); }, std::tan, -1.5, 1.5, 400000);
     Unary("atan: [-20, 20]", "atan", [](n_float v) { return N_ATAN(v); }, std::atan, -20.0, 20.0, 400000);
     Unary("asin: [-1, 1]", "asin", [](n_float v) { return N_ASIN(v); }, std::asin, -1.0, 1.0, 400000);
