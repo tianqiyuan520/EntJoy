@@ -32,6 +32,10 @@ jobs:
         run: ./build-avx2/MathDomainCheck
       - name: Domain gate (High)
         run: ./build-avx2/MathDomainCheckHigh
+      - name: Gate (IEEE, AVX2)
+        run: |
+          ./build-avx2/MathDomainCheckIEEE
+          ./build-avx2/MathUlpCheckIEEE
   # AVX512 指令用 Intel SDE 模拟：托管 runner 的 CPU 不一定有 AVX512
   avx512:
     runs-on: ubuntu-latest
@@ -82,6 +86,10 @@ jobs:
         run: ./build-sse41/MathDomainCheck
       - name: Domain gate (High, SSE4.1)
         run: ./build-sse41/MathDomainCheckHigh
+      - name: Gate (IEEE, SSE4.1)
+        run: |
+          ./build-sse41/MathDomainCheckIEEE
+          ./build-sse41/MathUlpCheckIEEE
   # AArch32：无 aarch64 指令，数学走标量回退；此作业验证回退路径能编译并通过门禁。
   arm32:
     runs-on: ubuntu-latest
