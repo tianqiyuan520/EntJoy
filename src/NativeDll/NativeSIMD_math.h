@@ -188,6 +188,8 @@ static N_FORCEINLINE __m256 _n_log_avx2(__m256 d) {
   res = _mm256_blendv_ps(res, _mm256_set1_ps(-INFINITY), _n256_eq(d, _mm256_setzero_ps()));
   res = _mm256_blendv_ps(res, _mm256_set1_ps(NAN), _n256_lt(d, _mm256_setzero_ps()));
   res = _mm256_blendv_ps(res, _mm256_set1_ps(INFINITY), _n256_eq(d, _mm256_set1_ps(INFINITY)));
+  // NaN 必须原样透传：NaN 的指数域是 255，按位取尾数会算出 89.1 这样的有限值
+  res = _mm256_blendv_ps(res, d, _mm256_cmp_ps(d, d, _CMP_UNORD_Q));
   return _mm256_sub_ps(res, _mm256_and_ps(sub, _mm256_set1_ps(16.635532333438687f)));
 }
 static N_FORCEINLINE __m256 _n_exp_avx2(__m256 d) {
@@ -310,21 +312,23 @@ static N_FORCEINLINE __m256 _n_pow_avx2_ps(__m256 x, __m256 y) {
 
   // 閻犳劗鍠庣花鎶藉极鐢喚绐楀ù鐘叉噺閺嗭綁寮悧鍫濈樄闁轰胶澧楅崹姘辩博鐎ｅ墎绀夊┑鍌氭处閺嗙喖骞愰崶銊︽闁告瑦鐗炵粈瀣晬濞戙垺濮滈柡浣哥摠閺嗙喖骞愰崶銊︽濞?NaN
   __m256 ay = _n256_abs(y);
-  __m256 yInt = _mm256_and_ps(_n256_eq(y, _n256_trunc(y)), _n256_lt(ay, _mm256_set1_ps(8388608.0f)));
-  __m256 half = _n256_trunc(_mm256_mul_ps(y, _mm256_set1_ps(0.5f)));
-  __m256 yOdd = _n256_ne(_mm256_mul_ps(half, _mm256_set1_ps(2.0f)), y);
+  __m256 yIsInt = _n256_eq(y, _n256_trunc(y));
+  // |y| >= 2^23 的 float 一定是偶数整数，奇偶性只需在更小的幅值上判
+  __m256 yOdd = _mm256_and_ps(_n256_ne(_mm256_mul_ps(_n256_trunc(_mm256_mul_ps(y, _mm256_set1_ps(0.5f))), _mm256_set1_ps(2.0f)), y),
+                                _n256_lt(ay, _mm256_set1_ps(8388608.0f)));
+  // 负号用符号位判，-0.0 也要参与（pow(-0, 奇数) = -0）
+  __m256 xSign = _mm256_castsi256_ps(_mm256_srai_epi32(_mm256_castps_si256(x), 31));
   __m256 sign = _mm256_blendv_ps(_mm256_set1_ps(1.0f), _mm256_set1_ps(-1.0f),
-                             _mm256_and_ps(_n256_lt(x, _mm256_set1_ps(0.0f)), _mm256_and_ps(yInt, yOdd)));
+                                _mm256_and_ps(xSign, _mm256_and_ps(yIsInt, yOdd)));
+  __m256 yInt = yIsInt;
   __m256 result = _mm256_mul_ps(mag, sign);
-
-  __m256 xNeg = _n256_lt(x, _mm256_set1_ps(0.0f));
-  result = _mm256_blendv_ps(result, _mm256_set1_ps(NAN), _mm256_and_ps(xNeg, _n256_not(yInt)));
+  result = _mm256_blendv_ps(result, _mm256_set1_ps(NAN), _mm256_and_ps(_n256_lt(x, _mm256_set1_ps(0.0f)), _n256_not(yInt)));
   result = _mm256_blendv_ps(result, _mm256_set1_ps(1.0f), _n256_eq(y, _mm256_set1_ps(0.0f)));
   __m256 xZero = _n256_eq(x, _mm256_set1_ps(0.0f));
-  result = _mm256_blendv_ps(result, _mm256_set1_ps(INFINITY),
-                       _mm256_and_ps(xZero, _n256_lt(y, _mm256_set1_ps(0.0f))));
-  result = _mm256_blendv_ps(result, _mm256_set1_ps(0.0f),
-                       _mm256_and_ps(xZero, _n256_gt(y, _mm256_set1_ps(0.0f))));
+  result = _mm256_blendv_ps(result, _mm256_mul_ps(sign, _mm256_set1_ps(INFINITY)),
+                             _mm256_and_ps(xZero, _n256_lt(y, _mm256_set1_ps(0.0f))));
+  result = _mm256_blendv_ps(result, _mm256_mul_ps(sign, _mm256_set1_ps(0.0f)),
+                             _mm256_and_ps(xZero, _n256_gt(y, _mm256_set1_ps(0.0f))));
   return _mm256_blendv_ps(result, _mm256_set1_ps(NAN),
                      _mm256_or_ps(_n256_ne(x, x), _n256_ne(y, y)));
 }
@@ -473,7 +477,11 @@ static N_FORCEINLINE __m256d _n_cosh4_pd(__m256d x) {
 }
 
 static N_FORCEINLINE __m256d _n_tanh4_pd(__m256d x) {
-  __m256d e2 = _n_exp4_pd(_mm256_mul_pd(_mm256_set1_pd(2.0), x));
+  __m256d ax = _mm256_and_pd(x, _mm256_castsi256_pd(_mm256_set1_epi64x(0x7fffffffffffffffLL)));
+  // |x| > 20 时 exp(2x) 溢出，(inf-1)/(inf+1) 与 NaN 都会出错；直接返回带符号的 1
+  __m256d xc = _mm256_blendv_pd(x, _mm256_or_pd(_mm256_set1_pd(20.0), _mm256_and_pd(x, _mm256_set1_pd(-0.0))),
+                                _mm256_cmp_pd(ax, _mm256_set1_pd(20.0), _CMP_GT_OQ));
+  __m256d e2 = _n_exp4_pd(_mm256_mul_pd(_mm256_set1_pd(2.0), xc));
   return _mm256_div_pd(_mm256_sub_pd(e2, _mm256_set1_pd(1.0)), _mm256_add_pd(e2, _mm256_set1_pd(1.0)));
 }
 
@@ -503,8 +511,12 @@ static N_FORCEINLINE __m256 _n_high_log(__m256 x) {
   __m256d thi = _mm256_sub_pd(xd_hi, _mm256_set1_pd(1.0));
 
   __m256 ax = _mm256_and_ps(x, _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));
-  __m256i ei = _mm256_sub_epi32(_mm256_srli_epi32(_mm256_castps_si256(ax), 23), _mm256_set1_epi32(127));
-  __m256 mf = _mm256_castsi256_ps(_mm256_or_si256(_mm256_and_si256(_mm256_castps_si256(x), _mm256_set1_epi32(0x807fffff)),
+  // float 次正规：先放大 2^24 再取对数，末尾补回 24*ln2
+  __m256 subM = _mm256_cmp_ps(ax, _mm256_set1_ps(1.17549435e-38f), _CMP_LT_OQ);
+  __m256 xs = _mm256_blendv_ps(x, _mm256_mul_ps(x, _mm256_set1_ps(16777216.0f)), subM);
+  __m256 axs = _mm256_and_ps(xs, _mm256_castsi256_ps(_mm256_set1_epi32(0x7fffffff)));
+  __m256i ei = _mm256_sub_epi32(_mm256_srli_epi32(_mm256_castps_si256(axs), 23), _mm256_set1_epi32(127));
+  __m256 mf = _mm256_castsi256_ps(_mm256_or_si256(_mm256_and_si256(_mm256_castps_si256(xs), _mm256_set1_epi32(0x807fffff)),
                                                                              _mm256_set1_epi32(0x3f800000)));
   const __m256d ln2 = _mm256_set1_pd(0.69314718055994530942);
   __m256d lo = _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(_mm256_castsi256_si128(ei)), ln2),
@@ -522,7 +534,14 @@ static N_FORCEINLINE __m256 _n_high_log(__m256 x) {
   hi = _mm256_blendv_pd(hi, nearHi, _mm256_cmp_pd(absHi, q, _CMP_LE_OQ));
 
   __m128 rl = _mm256_cvtpd_ps(lo), rh = _mm256_cvtpd_ps(hi);
-  return _mm256_insertf128_ps(_mm256_castps128_ps256(rl), rh, 1);
+  __m256 res = _mm256_insertf128_ps(_mm256_castps128_ps256(rl), rh, 1);
+  // 定义域：0 -> -inf，负数 -> NaN，+inf -> +inf，NaN 透传；次正规补回 24*ln2
+  res = _mm256_blendv_ps(res, _mm256_set1_ps(-INFINITY), _n256_eq(x, _mm256_setzero_ps()));
+  res = _mm256_blendv_ps(res, _mm256_set1_ps(NAN), _n256_lt(x, _mm256_setzero_ps()));
+  res = _mm256_blendv_ps(res, _mm256_set1_ps(INFINITY), _n256_eq(x, _mm256_set1_ps(INFINITY)));
+  res = _mm256_blendv_ps(res, x, _mm256_cmp_ps(x, x, _CMP_UNORD_Q));
+  __m256 corr = _mm256_and_ps(subM, _mm256_set1_ps(16.635532333438687f));
+  return _mm256_sub_ps(res, corr);
 }
 
 static N_FORCEINLINE __m256 _n_high_log10(__m256 x) {
@@ -696,7 +715,11 @@ static N_FORCEINLINE n_float _n_cosh_avx512(n_float a) {
 }
 
 static N_FORCEINLINE n_float _n_tanh_avx512(n_float a) {
-  __m512 e2 = _n_exp_avx512(_mm512_mul_ps(_mm512_set1_ps(2.0f), a));
+  // |x| > 44 时 exp(2x) 溢出成 inf，(inf-1)/(inf+1) 变 NaN；按位夹到 ±88（保留 NaN 与符号）
+  __mmask16 big512 = _mm512_cmp_ps_mask(_n_abs_avx512(a), _mm512_set1_ps(44.0f), _CMP_GT_OQ);
+  __m512 t2 = _mm512_mask_blend_ps(big512, _mm512_mul_ps(_mm512_set1_ps(2.0f), a),
+                                   _mm512_or_ps(_mm512_set1_ps(88.0f), _mm512_and_ps(a, _mm512_set1_ps(-0.0f))));
+  __m512 e2 = _n_exp_avx512(t2);
   __m512 wide = _mm512_div_ps(_mm512_sub_ps(e2, _mm512_set1_ps(1.0f)), _mm512_add_ps(e2, _mm512_set1_ps(1.0f)));
   __m512 z = _mm512_mul_ps(a, a);
   __m512 sp = _mm512_set1_ps(62.0f / 2835.0f);
@@ -870,6 +893,8 @@ static N_FORCEINLINE n_float _n_log_neon(n_float d) {
   res = vbslq_f32(vceqq_f32(d, vdupq_n_f32(0.0f)), vdupq_n_f32(-INFINITY), res);
   res = vbslq_f32(vcltq_f32(d, vdupq_n_f32(0.0f)), vdupq_n_f32(NAN), res);
   res = vbslq_f32(vceqq_f32(d, vdupq_n_f32(INFINITY)), vdupq_n_f32(INFINITY), res);
+  // NaN 必须原样透传：NaN 的指数域是 255，按位取尾数会算出有限值
+  res = vbslq_f32(vmvnq_u32(vceqq_f32(d, d)), d, res);
   return vsubq_f32(res, vbslq_f32(sub, vdupq_n_f32(16.635532333438687f), vdupq_n_f32(0.0f)));
 }
 
@@ -1175,7 +1200,12 @@ static N_FORCEINLINE float64x2_t _n_log2d_neon(float64x2_t d) {
   float64x2_t ef = vcvtq_f64_s64(e);
   float64x2_t wide = vmulq_f64(ef, vdupq_n_f64(0.69314718055994530942));
   wide = vfmaq_f64(wide, vmulq_f64(vmulq_f64(x, p), vdupq_n_f64(2.0)), vdupq_n_f64(1.0));
-  return vbslq_f64(vcleq_f64(at, vdupq_n_f64(0.25)), near, wide);
+  float64x2_t res = vbslq_f64(vcleq_f64(at, vdupq_n_f64(0.25)), near, wide);
+  // 定义域：0 -> -inf，负数 -> NaN，+inf -> +inf，NaN 透传
+  res = vbslq_f64(vceqq_f64(d, vdupq_n_f64(0.0)), vdupq_n_f64(-INFINITY), res);
+  res = vbslq_f64(vcltq_f64(d, vdupq_n_f64(0.0)), vdupq_n_f64(NAN), res);
+  res = vbslq_f64(vceqq_f64(d, vdupq_n_f64(INFINITY)), vdupq_n_f64(INFINITY), res);
+  return vbslq_f64(vmvnq_u64(vceqq_f64(d, d)), d, res);
 }
 
 static N_FORCEINLINE float64x2_t _n_log2d_base2_neon(float64x2_t d) {
@@ -1446,6 +1476,8 @@ static N_FORCEINLINE __m128 _n_log_sse41(__m128 d) {
   res = _n_blend_sse41(res, _mm_set1_ps(-INFINITY), _mm_cmpeq_ps(d, _mm_setzero_ps()));
   res = _n_blend_sse41(res, _mm_set1_ps(NAN), _mm_cmplt_ps(d, _mm_setzero_ps()));
   res = _n_blend_sse41(res, _mm_set1_ps(INFINITY), _mm_cmpeq_ps(d, _mm_set1_ps(INFINITY)));
+  // NaN 必须原样透传：NaN 的指数域是 255，按位取尾数会算出有限值
+  res = _n_blend_sse41(res, d, _mm_cmpunord_ps(d, d));
   return _mm_sub_ps(res, _mm_and_ps(sub, _mm_set1_ps(16.635532333438687f)));
 }
 
