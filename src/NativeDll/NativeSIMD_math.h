@@ -101,18 +101,21 @@ static N_FORCEINLINE n_float _n_dom_acos(n_float x, n_float r) {
   r = n_blendv_ps(r, n_set1_ps(0.0f), n_cmp_eq_ps(x, n_set1_ps(1.0f)));
   return n_blendv_ps(r, x, n_cmp_ne_ps(x, x));
 }
-
-// tan 的大参数：Cody-Waite 归约在此之上不可靠，sin/cos 各自回退后相除还会出 0/0，
-// 因此超过 1e7 时整 lane 走 libm
-static N_FORCEINLINE n_float _n_tan_big(n_float x, n_float r) {
+// 三角函数的大参数：Cody-Waite 归约在 1e7 之上不可靠（tan 还会因 sin/cos 分别回退而相除出 0/0），
+// 超过阈值整 lane 走 libm。三个入口共用同一实现，新增函数只需换 libm 指针。
+static N_FORCEINLINE n_float _n_trig_big(n_float x, n_float r, float (*f)(float)) {
   if (!n_any_true(n_cmp_gt_ps(n_fabs_ps(x), n_set1_ps(1.0e7f)))) return r;
   float la[NSIMD_WIDTH], lr[NSIMD_WIDTH];
   n_store_ps(la, x);
   n_store_ps(lr, r);
   for (int i = 0; i < NSIMD_WIDTH; i++)
-    if (!(la[i] <= 1.0e7f && la[i] >= -1.0e7f)) lr[i] = (float)::tan((double)la[i]);
+    if (!(la[i] <= 1.0e7f && la[i] >= -1.0e7f)) lr[i] = f(la[i]);
   return n_load_ps(lr);
 }
+
+static N_FORCEINLINE n_float _n_sin_big(n_float x, n_float r) { return _n_trig_big(x, r, ::sinf); }
+static N_FORCEINLINE n_float _n_cos_big(n_float x, n_float r) { return _n_trig_big(x, r, ::cosf); }
+static N_FORCEINLINE n_float _n_tan_big(n_float x, n_float r) { return _n_trig_big(x, r, ::tanf); }
 
 
 // ================================================================
@@ -1668,8 +1671,8 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
 
   // Inline AVX512 (16-wide) / AVX2 (8-wide) polynomial (fastest, zero function-call overhead)
   #if defined(NSIMD_AVX512)
-    #define N_SIN(a) _n_dom_odd_zero((a), _n_sin_avx512(a))
-    #define N_COS(a)     _n_cos_avx512(a)
+    #define N_SIN(a) _n_dom_odd_zero((a), _n_sin_big((a), _n_sin_avx512(a)))
+    #define N_COS(a) _n_cos_big((a), _n_cos_avx512(a))
     #define N_LOG(a) _n_dom_log((a), _n_log_avx512(a))
     #define N_EXP(a) _n_dom_exp((a), _n_exp_avx512(a))
     #define N_LOG10(a)   _mm512_mul_ps(N_LOG(a), _mm512_set1_ps(0.4342944819032518f))
@@ -1684,14 +1687,14 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
   #define N_TANH(a) _n_dom_odd_zero((a), _n_dom_tanh((a), _n_tanh_avx512(a)))
   #define N_SINCOS(a,s,c) _n_sincos_avx512(a, s, c)
   #elif defined(NSIMD_AVX2)
-    #define N_SIN(a) _n_dom_odd_zero((a), _n_sin_avx2(a))
-    #define N_COS(a)     _n_cos_avx2(a)
+    #define N_SIN(a) _n_dom_odd_zero((a), _n_sin_big((a), _n_sin_avx2(a)))
+    #define N_COS(a) _n_cos_big((a), _n_cos_avx2(a))
     #define N_LOG(a) _n_dom_log((a), _n_log_avx2(a))
     #define N_EXP(a) _n_dom_exp((a), _n_exp_avx2(a))
     #define N_LOG10(a)   _mm256_mul_ps(N_LOG(a), _mm256_set1_ps(0.4342944819032518f))
   #elif defined(NSIMD_SSE4)
-  #define N_SIN(a) _n_dom_odd_zero((a), _n_sin_sse41(a))
-  #define N_COS(a)     _n_cos_sse41(a)
+  #define N_SIN(a) _n_dom_odd_zero((a), _n_sin_big((a), _n_sin_sse41(a)))
+  #define N_COS(a) _n_cos_big((a), _n_cos_sse41(a))
   #define N_LOG(a) _n_dom_log((a), _n_log_sse41(a))
   #define N_EXP(a) _n_dom_exp((a), _n_exp_sse41(a))
   #define N_LOG10(a)   _mm_mul_ps(N_LOG(a), _mm_set1_ps(0.4342944819032518f))
@@ -1706,8 +1709,8 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
   #define N_TANH(a) _n_dom_odd_zero((a), _n_dom_tanh((a), _n_tanh_sse41(a)))
   #define N_SINCOS(a,s,c) _n_sincos_sse41(a, s, c)
 #elif defined(NSIMD_NEON) && defined(__aarch64__)
-#define N_SIN(a) _n_dom_odd_zero((a), _n_sin_neon(a))
-#define N_COS(a)     _n_cos_neon(a)
+#define N_SIN(a) _n_dom_odd_zero((a), _n_sin_big((a), _n_sin_neon(a)))
+#define N_COS(a) _n_cos_big((a), _n_cos_neon(a))
 #define N_LOG(a) _n_dom_log((a), _n_log_neon(a))
 #define N_EXP(a) _n_dom_exp((a), _n_exp_neon(a))
 #define N_LOG10(a)   vmulq_f32(N_LOG(a), vdupq_n_f32(0.4342944819032518f))
@@ -1743,8 +1746,8 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
 // ===== High (~1.0 ULP) =====
 #elif SIMD_MATH_PRECISION == 2
   #if defined(NSIMD_AVX512)
-    #define N_SIN(a) _n_dom_odd_zero((a), _n_high_sin_avx512(a))
-    #define N_COS(a)       _n_high_cos_avx512(a)
+    #define N_SIN(a) _n_dom_odd_zero((a), _n_sin_big((a), _n_high_sin_avx512(a)))
+    #define N_COS(a) _n_cos_big((a), _n_high_cos_avx512(a))
     #define N_TAN(a) _n_dom_odd_zero((a), _n_tan_big((a), _n_high_tan_avx512(a)))
     #define N_ASIN(a) _n_dom_odd_zero((a), _n_dom_asin((a), _n_high_asin_avx512(a)))
     #define N_ACOS(a) _n_dom_acos((a), _n_high_acos_avx512(a))
@@ -1761,8 +1764,8 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
   #elif defined(NSIMD_SSE4)
     // SSE4.1 无 FMA、只有 4 lane：double lane 方案实测比 libm 慢（0.32–0.79x），
     // 因此 High 档复用 float 域实现（1–3 ULP），仍快于逐 lane libm。
-    #define N_SIN(a) _n_dom_odd_zero((a), _n_sin_sse41(a))
-    #define N_COS(a)       _n_cos_sse41(a)
+    #define N_SIN(a) _n_dom_odd_zero((a), _n_sin_big((a), _n_sin_sse41(a)))
+    #define N_COS(a) _n_cos_big((a), _n_cos_sse41(a))
     #define N_TAN(a) _n_dom_odd_zero((a), _n_tan_big((a), _n_tan_sse41(a)))
     #define N_ASIN(a) _n_dom_odd_zero((a), _n_dom_asin((a), _n_asin_sse41(a)))
     #define N_ACOS(a) _n_dom_acos((a), _n_acos_sse41(a))
@@ -1777,8 +1780,8 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
   // pow 在 SSE4 上走 libm 回退（无 FMA 时 log2/exp2 精度不足）
     #define N_SINCOS(a,s,c) _n_sincos_sse41(a, s, c)
   #elif defined(NSIMD_NEON) && defined(__aarch64__)
-    #define N_SIN(a) _n_dom_odd_zero((a), _n_high_sin_neon(a))
-    #define N_COS(a)       _n_high_cos_neon(a)
+    #define N_SIN(a) _n_dom_odd_zero((a), _n_sin_big((a), _n_high_sin_neon(a)))
+    #define N_COS(a) _n_cos_big((a), _n_high_cos_neon(a))
     #define N_TAN(a) _n_dom_odd_zero((a), _n_tan_big((a), _n_high_tan_neon(a)))
     #define N_ASIN(a) _n_dom_odd_zero((a), _n_dom_asin((a), _n_high_asin_neon(a)))
     #define N_ACOS(a) _n_dom_acos((a), _n_high_acos_neon(a))
@@ -1793,8 +1796,8 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
     // pow 在 NEON High 上走 libm 回退：double lane 版尚未处理负底数/零底数定义域
     #define N_SINCOS(a,s,c) _n_high_sincos_neon(a, s, c)
   #elif defined(NSIMD_AVX2)
-    #define N_SIN(a) _n_dom_odd_zero((a), _n_high_sin(a))
-    #define N_COS(a)       _n_high_cos(a)
+    #define N_SIN(a) _n_dom_odd_zero((a), _n_sin_big((a), _n_high_sin(a)))
+    #define N_COS(a) _n_cos_big((a), _n_high_cos(a))
     #define N_TAN(a) _n_dom_odd_zero((a), _n_tan_big((a), _n_high_tan(a)))
     #define N_ASIN(a) _n_dom_odd_zero((a), _n_dom_asin((a), _n_high_asin(a)))
     #define N_ACOS(a) _n_dom_acos((a), _n_high_acos(a))
@@ -1847,7 +1850,7 @@ static N_FORCEINLINE n_float _n_sin_fallback(n_float a) {
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::sinf(lane[i]);
   return n_load_ps(lane);
 }
-#define N_SIN(a) _n_dom_odd_zero((a), _n_sin_fallback(a))
+#define N_SIN(a) _n_dom_odd_zero((a), _n_sin_big((a), _n_sin_fallback(a)))
 #endif
 
 #ifndef N_COS
@@ -1856,7 +1859,7 @@ static N_FORCEINLINE n_float _n_cos_fallback(n_float a) {
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::cosf(lane[i]);
   return n_load_ps(lane);
 }
-#define N_COS(a) _n_cos_fallback(a)
+#define N_COS(a) _n_cos_big((a), _n_cos_fallback(a))
 #endif
 
 #ifndef N_TAN

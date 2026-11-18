@@ -75,6 +75,8 @@ int main()
                               1e-40f, 1.40129846e-45f, 1e38f, -1e38f, 0.5f, -0.5f, 1.0f };
     const int nSpecial = (int)(sizeof(special) / sizeof(special[0]));
 
+    Unary("sin",   [](n_float v) { return N_SIN(v); },   RefSin,   special, nSpecial);
+    Unary("cos",   [](n_float v) { return N_COS(v); },   RefCos,   special, nSpecial);
     Unary("log",   [](n_float v) { return N_LOG(v); },   RefLog,   special, nSpecial);
     Unary("log10", [](n_float v) { return N_LOG10(v); }, RefLog10, special, nSpecial);
     Unary("exp",   [](n_float v) { return N_EXP(v); },   RefExp,   special, nSpecial);
@@ -108,7 +110,8 @@ int main()
     // N_SINCOS 一次算两路，必须与单独调用一致
     {
         alignas(64) float in[NSIMD_WIDTH], sOut[NSIMD_WIDTH], cOut[NSIMD_WIDTH];
-        const float xs[] = { 0.0f, 0.5f, -0.5f, 1.5707964f, 3.1415927f, -3.1415927f };
+        const float xs[] = { 0.0f, -0.0f, 0.5f, -0.5f, 1.5707964f, 3.1415927f, -3.1415927f,
+                              INFINITY, -INFINITY, NAN, 1e-40f };
         for (float x : xs)
         {
             for (int k = 0; k < NSIMD_WIDTH; k++) in[k] = x;
