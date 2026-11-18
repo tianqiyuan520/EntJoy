@@ -1174,7 +1174,11 @@ static N_FORCEINLINE float64x2_t _n_atan2_2_neon(float64x2_t y, float64x2_t x) {
 }
 
 static N_FORCEINLINE float64x2_t _n_exp2d_exp_neon(float64x2_t x) {
-  return _n_exp2d_neon(vmulq_f64(x, vdupq_n_f64(1.4426950408889634)));
+  float64x2_t res = _n_exp2d_neon(vmulq_f64(x, vdupq_n_f64(1.4426950408889634)));
+  // 定义域：+inf -> +inf，-inf -> 0，NaN 透传
+  res = vbslq_f64(vcgtq_f64(x, vdupq_n_f64(709.78)), vdupq_n_f64(INFINITY), res);
+  res = vbslq_f64(vcltq_f64(x, vdupq_n_f64(-745.2)), vdupq_n_f64(0.0), res);
+  return vbslq_f64(vmvnq_u64(vceqq_f64(x, x)), x, res);
 }
 
 static N_FORCEINLINE float64x2_t _n_log2d_neon(float64x2_t d) {
@@ -1270,7 +1274,12 @@ static N_FORCEINLINE float64x2_t _n_cosh2d_neon(float64x2_t x) {
 }
 
 static N_FORCEINLINE float64x2_t _n_tanh2d_neon(float64x2_t x) {
-  float64x2_t e2 = _n_exp2d_exp_neon(vmulq_f64(vdupq_n_f64(2.0), x));
+  float64x2_t ax = vabsq_f64(x);
+  float64x2_t xc = vbslq_f64(vcgtq_f64(ax, vdupq_n_f64(20.0)),
+                             vorrq_u64(vreinterpretq_u64_f64(vdupq_n_f64(20.0)),
+                                       vandq_u64(vreinterpretq_u64_f64(x), vdupq_n_u64(0x8000000000000000ULL))),
+                             x);
+  float64x2_t e2 = _n_exp2d_exp_neon(vmulq_f64(vdupq_n_f64(2.0), xc));
   return vdivq_f64(vsubq_f64(e2, vdupq_n_f64(1.0)), vaddq_f64(e2, vdupq_n_f64(1.0)));
 }
 
