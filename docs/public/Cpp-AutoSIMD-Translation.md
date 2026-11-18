@@ -218,10 +218,13 @@ AVX512 与 NEON 的数值验证依赖模拟：本机 CPU 不支持 AVX512，也�
 
 | 函数 | 规则 |
 |---|---|
-| `_n_dom_exp` / `_n_dom_exp_pd` | `+inf → +inf`，`-inf → 0`，NaN 透传 |
-| `_n_dom_log` / `_n_dom_log_pd` | `0 → -inf`，负数 → NaN，`+inf → +inf`，NaN 透传 |
+| `_n_dom_exp` | `+inf → +inf`，`-inf → 0`，NaN 透传；`2^n` 拆成两段等量因子，`2^128` 尾段不再少一半 |
+| `_n_dom_log` | `0 → -inf`，负数 → NaN，`+inf → +inf`，NaN 透传 |
 | `_n_dom_tanh` | `|x| > 20` → 带符号的 1，NaN 透传 |
-| `_n_dom_atan2` / `_n_dom_atan2_pd` | `y = ±0 且 x > 0` → `y` 的带符号零 |
+| `_n_dom_asin` / `_n_dom_acos` | `|x| > 1` → NaN；`acos(1)` 精确为 `+0` |
+| `_n_dom_atan2` | `±inf` 组合（`±π/2`、`±π/4`、`±3π/4`、`±0`、`±π`）与 `y = ±0` 的符号 |
+| `_n_dom_pow` | `y = ±0` 或 `x = 1` → 1；`±inf` 底数与零底数按奇偶给 `±inf` / `±0` |
+| `_n_dom_odd_zero` | `sin`/`tan`/`atan`/`asin`/`sinh`/`tanh` 在 `±0` 处返回输入，保留符号 |
 
 新增内核只要走宏就自动获得这些行为，不会出现某个精度档漏一处。
 
@@ -240,7 +243,7 @@ float 次正规在 `log` 上先放大 2^24、结果补回 `24·ln2`，Fastest �
 | 工具 | 覆盖 | 判定口径 |
 |---|---|---|
 | `tools/MathUlpCheck` | 各函数在连续区间上的 ULP 分布 | `|bits(out) - bits(ref)|`，次正规按 `2^-149` 计的绝对误差；非有限参考值不计入（区间采样里溢出属正常） |
-| `tools/MathUlpCheck/domain.cpp` | 157 项定点用例：`0`/`±0`/负数/`±inf`/NaN/次正规、`pow` 定点、`atan2` 定点、`N_SINCOS`、`N_LOG10` | 按结果类别比对（NaN / `±inf` / `±0` / 有限值），类别不符即失败 |
+| `tools/MathUlpCheck/domain.cpp` | 178 项定点用例：`0`/`±0`/负数/`±inf`/NaN/次正规、`pow` 定点、`atan2` 定点、`N_SINCOS`、`N_LOG10` | 按结果类别比对（NaN / `±inf` / `±0` / 有限值），类别不符即失败 |
 
 `ENTJOY_MATH_ISA` 选择目标指令集。`.github/workflows/native-math.yml` 五个作业：
 
