@@ -40,16 +40,17 @@ namespace NativeTranspiler.Analyzer
             string elemCppType = "float";
             string baseExpr = null;
             bool vectorizableElem = false;
+            SimdElemClass elemClass = SimdElemClass.Other;
             // 统一解析：NativeArray 字段 → `X_ptr`；裸指针变量（局部/形参）→ `X`
             if (NativeArrayBaseInfo(elementAccess.Expression) is { } naInfo)
             {
                 isNativeArray = true;
                 elemCppType = naInfo.ElemType;
                 baseExpr = naInfo.Base;
-                // 向量 load/gather 只支持 float/int（n_load_ps / n_load_epi32 / gather）。
-                // byte / uint 等窄或宽元素 → 退回标量下标读，避免把 byte* 当 float*/int* 用。
-                vectorizableElem = elemCppType == "float" || elemCppType == "int"
-                    || SimdVectorTypes.IsPair(elemCppType);
+                // 元素类别决定访存路径：32 位标量/pair 可直接向量化，8/16 位整数走扩宽 load，
+                // 其余（结构体等）逐 lane。
+                elemClass = SimdVectorTypes.ClassifyElem(elemCppType);
+                vectorizableElem = elemClass is SimdElemClass.Lane32 or SimdElemClass.Pair;
             }
             baseExpr ??= TranslateExpression(elementAccess.Expression);
             string indexExpr = "0";
@@ -114,8 +115,8 @@ namespace NativeTranspiler.Analyzer
                             return $"simd_value<EntJoy::Mathematics::int2>::broadcast({naBase}[{scalarIdx}])";
                         if (elemCppType == "float")
                             return $"simd_value<float>::broadcast({naBase}[{scalarIdx}])";
-                        if (elemCppType == "int")
-                            return $"simd_value<int>::broadcast({naBase}[{scalarIdx}])";
+                        if (elemCppType == "int" || elemCppType == "unsigned int")
+                            return $"simd_value<int>::broadcast((int){naBase}[{scalarIdx}])";
                         return $"simd_value<float>::broadcast({naBase}[{scalarIdx}])";
                     }
                 }
@@ -150,30 +151,17 @@ namespace NativeTranspiler.Analyzer
                     safeIdx = indexExpr;
                 }
 
-                // Contiguous index optimization: when index is _simdIndexVar (v_i/v_j) in a batch loop,
-                // or uniform_part + _simdIndexVar (like i*100 + v_j), use contiguous load instead of gather.
-                if (!string.IsNullOrEmpty(_batchLoopVar))
+                // 连续访问：下标能写成 `v_i ± 标量` 时用整宽 load，不做 gather。
+                if (elementAccess.ArgumentList?.Arguments.Count > 0
+                    && TryResolveContiguousOffset(elementAccess.ArgumentList.Arguments[0].Expression, out string pointerOffset))
                 {
-                    string contBase = null;
-                    if (indexExpr == _simdIndexVar)
-                        contBase = _batchLoopVar;  // simple: ptr + si
-                    else
-                    {
-                        // Detect: uniform_expr + _simdIndexVar (like "i*100 + v_j")
-                        string suffix = $"+ {_simdIndexVar}";
-                        if (indexExpr.EndsWith(suffix))
-                            contBase = indexExpr.Substring(0, indexExpr.Length - suffix.Length).Trim();
-                        else if (indexExpr.EndsWith($"+ {_simdIndexVar})"))
-                            contBase = indexExpr.Substring(0, indexExpr.Length - ($"+ {_simdIndexVar})").Length).Trim().TrimStart('(');
-                    }
-                    if (contBase != null)
-                    {
-                        string baseOff = contBase == _batchLoopVar ? contBase : $"({contBase}) + {_batchLoopVar}";
-                        if (elemCppType == "float")
-                            return $"simd_value<float>{{ n_load_ps({baseExpr} + {baseOff}) }}";
-                        if (elemCppType == "int")
-                            return $"simd_value<int>{{ n_load_epi32({baseExpr} + {baseOff}) }}";
-                    }
+                    if (elemCppType == "float")
+                        return $"simd_value<float>{{ n_load_ps({baseExpr} + {pointerOffset}) }}";
+                    if (elemCppType == "int")
+                        return $"simd_value<int>{{ n_load_epi32({baseExpr} + {pointerOffset}) }}";
+                    // uint 与 int 同宽同布局：按 int 指针搬运，位模式不变。
+                    if (elemCppType == "unsigned int")
+                        return $"simd_value<int>{{ n_load_epi32((const int*)({baseExpr}) + {pointerOffset}) }}";
                 }
 
                 // SIMD gather
@@ -196,10 +184,22 @@ namespace NativeTranspiler.Analyzer
                     return $"simd_value<float>::gathf({baseExpr}, {safeIdx}.v)";
                 if (elemCppType == "int")
                     return $"simd_value<int>::gather({baseExpr}, {safeIdx})";
+                // uint 的 gather 走同一套 32 位整数收集；指针按 int* 重新解释，位模式不变。
+                if (elemCppType == "unsigned int")
+                    return $"simd_value<int>::gather((const int*)({baseExpr}), {safeIdx})";
                 return $"simd_value<float>::gathf({baseExpr}, {safeIdx}.v)";
             }
 
-            // A1 通解：varying 下标 + 不可向量化元素（byte/sbyte/uint/float2/结构体）的向量读。
+            // 窄整数（u8/s8/u16/s16）连续访问：一次扩宽 load 取 8/16 个元素，替代逐 lane 读。
+            if (isNativeArray && elemClass == SimdElemClass.NarrowInt && indexKind >= VarKind.Varying
+                && elementAccess.ArgumentList?.Arguments.Count > 0
+                && SimdVectorTypes.NarrowLoadFn(elemCppType) is { } widenLoad
+                && TryResolveContiguousOffset(elementAccess.ArgumentList.Arguments[0].Expression, out string narrowOffset))
+            {
+                return $"simd_value<int>{{ {widenLoad}((const {elemCppType}*)({baseExpr}) + {narrowOffset}) }}";
+            }
+
+            // A1 通解：varying 下标 + 不可向量化元素（byte/sbyte/float2/结构体）的向量读。
             //   会退化成 lane0 标量读（`n_extract_lane_epi32((v_i).v, 0)`）——那是"每 lane 读同一个
             //   地址"的静默错解，所以整段 job 还被 `HasNonVectorizableCall` 兜底成 per-lane 标量循环。
             //   这里按元素宽度走"逐 lane 取值 + 掩码 blend"：只在语义上需要 gather 时逐 lane 读，

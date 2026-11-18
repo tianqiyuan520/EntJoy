@@ -35,6 +35,10 @@ namespace NativeTranspiler.Analyzer
         private readonly HashSet<string> _forLoopVars = new();
         // Induction variables from uniform-bound reduction loops (for broadcast optimization)
         private readonly HashSet<string> _uniformLoopVars = new();
+        // 展开期常量：循环变量 → 本次迭代的字面值（连续下标判定用）
+        private readonly Dictionary<string, int> _uniformIterationConstants = new();
+        // 生成物里已是标量的名字（标量局部 / uniform 形参），连续下标判定用
+        private readonly HashSet<string> _scalarUniformNames = new();
 
         // Loop tracking (for break/continue)
         private struct LoopFrame

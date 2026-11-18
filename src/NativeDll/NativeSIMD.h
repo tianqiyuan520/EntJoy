@@ -204,6 +204,159 @@ static inline void n_store_epi32(int* p, n_int v) {
 }
 
 // ============================================================
+// Narrow integer elements (u8/s8/u16/s16): widening load / truncating pack store
+//   C# 的 (byte)(x) 是截断，这里取低 8/16 位，语义与 static_cast 一致。
+//   AVX2 用转换指令，SSE4.1 用 4 lane 版；其余平台逐 lane 标量回退（正确但无加速）。
+// ============================================================
+static inline n_int n_load_widen_u8(const unsigned char* p) {
+#if defined(NSIMD_AVX512)
+    return _mm512_cvtepu8_epi32(_mm_loadu_si128((const __m128i*)p));
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)p));
+#elif defined(NSIMD_SSE4)
+    return _mm_cvtepu8_epi32(_mm_cvtsi32_si128(*(const int*)p));
+#elif defined(NSIMD_NEON)
+    return vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(vmovl_u8(vld1_u8(p)))));
+#else
+    int tmp[NSIMD_WIDTH];
+    for (int i = 0; i < NSIMD_WIDTH; i++) tmp[i] = (int)p[i];
+    return n_load_epi32(tmp);
+#endif
+}
+
+static inline n_int n_load_widen_s8(const signed char* p) {
+#if defined(NSIMD_AVX512)
+    return _mm512_cvtepi8_epi32(_mm_loadu_si128((const __m128i*)p));
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_cvtepi8_epi32(_mm_loadl_epi64((const __m128i*)p));
+#elif defined(NSIMD_SSE4)
+    return _mm_cvtepi8_epi32(_mm_cvtsi32_si128(*(const int*)p));
+#elif defined(NSIMD_NEON)
+    return vmovl_s16(vget_low_s16(vmovl_s8(vld1_s8(p))));
+#else
+    int tmp[NSIMD_WIDTH];
+    for (int i = 0; i < NSIMD_WIDTH; i++) tmp[i] = (int)p[i];
+    return n_load_epi32(tmp);
+#endif
+}
+
+static inline n_int n_load_widen_u16(const unsigned short* p) {
+#if defined(NSIMD_AVX512)
+    return _mm512_cvtepu16_epi32(_mm256_loadu_si256((const __m256i*)p));
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)p));
+#elif defined(NSIMD_SSE4)
+    return _mm_cvtepu16_epi32(_mm_loadl_epi64((const __m128i*)p));
+#elif defined(NSIMD_NEON)
+    return vreinterpretq_s32_u32(vmovl_u16(vld1_u16(p)));
+#else
+    int tmp[NSIMD_WIDTH];
+    for (int i = 0; i < NSIMD_WIDTH; i++) tmp[i] = (int)p[i];
+    return n_load_epi32(tmp);
+#endif
+}
+
+static inline n_int n_load_widen_s16(const short* p) {
+#if defined(NSIMD_AVX512)
+    return _mm512_cvtepi16_epi32(_mm256_loadu_si256((const __m256i*)p));
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_cvtepi16_epi32(_mm_loadu_si128((const __m128i*)p));
+#elif defined(NSIMD_SSE4)
+    return _mm_cvtepi16_epi32(_mm_loadl_epi64((const __m128i*)p));
+#elif defined(NSIMD_NEON)
+    return vmovl_s16(vld1_s16(p));
+#else
+    int tmp[NSIMD_WIDTH];
+    for (int i = 0; i < NSIMD_WIDTH; i++) tmp[i] = (int)p[i];
+    return n_load_epi32(tmp);
+#endif
+}
+
+static inline void n_store_pack_u8(unsigned char* p, n_int v) {
+#if defined(NSIMD_AVX512)
+    _mm_storeu_si128((__m128i*)p, _mm512_cvtepi32_epi8(v));
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    __m128i lo = _mm_and_si128(_mm256_castsi256_si128(v), _mm_set1_epi32(0xFF));
+    __m128i hi = _mm_and_si128(_mm256_extracti128_si256(v, 1), _mm_set1_epi32(0xFF));
+    __m128i w = _mm_packus_epi32(lo, hi);
+    _mm_storel_epi64((__m128i*)p, _mm_packus_epi16(w, w));
+#elif defined(NSIMD_SSE4)
+    __m128i lo = _mm_and_si128(v, _mm_set1_epi32(0xFF));
+    __m128i w = _mm_packus_epi32(lo, _mm_setzero_si128());
+    *(int*)p = _mm_cvtsi128_si32(_mm_packus_epi16(w, w));
+#elif defined(NSIMD_NEON)
+    int16x4_t w = vmovn_s32(v);
+    int8x8_t b = vmovn_s16(vcombine_s16(w, w));
+    vst1_lane_u32((uint32_t*)p, vreinterpret_u32_s8(b), 0);
+#else
+    int tmp[NSIMD_WIDTH];
+    n_store_epi32(tmp, v);
+    for (int i = 0; i < NSIMD_WIDTH; i++) p[i] = (unsigned char)tmp[i];
+#endif
+}
+
+static inline void n_store_pack_s8(signed char* p, n_int v) {
+#if defined(NSIMD_AVX512)
+    _mm_storeu_si128((__m128i*)p, _mm512_cvtepi32_epi8(v));
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    __m128i lo = _mm_and_si128(_mm256_castsi256_si128(v), _mm_set1_epi32(0xFF));
+    __m128i hi = _mm_and_si128(_mm256_extracti128_si256(v, 1), _mm_set1_epi32(0xFF));
+    __m128i w = _mm_packus_epi32(lo, hi);
+    _mm_storel_epi64((__m128i*)p, _mm_packus_epi16(w, w));
+#elif defined(NSIMD_SSE4)
+    __m128i lo = _mm_and_si128(v, _mm_set1_epi32(0xFF));
+    __m128i w = _mm_packus_epi32(lo, _mm_setzero_si128());
+    *(int*)p = _mm_cvtsi128_si32(_mm_packus_epi16(w, w));
+#elif defined(NSIMD_NEON)
+    int16x4_t w = vmovn_s32(v);
+    int8x8_t b = vmovn_s16(vcombine_s16(w, w));
+    vst1_lane_u32((uint32_t*)p, vreinterpret_u32_s8(b), 0);
+#else
+    int tmp[NSIMD_WIDTH];
+    n_store_epi32(tmp, v);
+    for (int i = 0; i < NSIMD_WIDTH; i++) p[i] = (signed char)tmp[i];
+#endif
+}
+
+static inline void n_store_pack_u16(unsigned short* p, n_int v) {
+#if defined(NSIMD_AVX512)
+    _mm256_storeu_si256((__m256i*)p, _mm512_cvtepi32_epi16(v));
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    __m128i lo = _mm_and_si128(_mm256_castsi256_si128(v), _mm_set1_epi32(0xFFFF));
+    __m128i hi = _mm_and_si128(_mm256_extracti128_si256(v, 1), _mm_set1_epi32(0xFFFF));
+    _mm_storeu_si128((__m128i*)p, _mm_packus_epi32(lo, hi));
+#elif defined(NSIMD_SSE4)
+    __m128i lo = _mm_and_si128(v, _mm_set1_epi32(0xFFFF));
+    _mm_storel_epi64((__m128i*)p, _mm_packus_epi32(lo, _mm_setzero_si128()));
+#elif defined(NSIMD_NEON)
+    vst1_s64((int64_t*)p, vreinterpret_s64_s16(vmovn_s32(v)));
+#else
+    int tmp[NSIMD_WIDTH];
+    n_store_epi32(tmp, v);
+    for (int i = 0; i < NSIMD_WIDTH; i++) p[i] = (unsigned short)tmp[i];
+#endif
+}
+
+static inline void n_store_pack_s16(short* p, n_int v) {
+#if defined(NSIMD_AVX512)
+    _mm256_storeu_si256((__m256i*)p, _mm512_cvtepi32_epi16(v));
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    __m128i lo = _mm_and_si128(_mm256_castsi256_si128(v), _mm_set1_epi32(0xFFFF));
+    __m128i hi = _mm_and_si128(_mm256_extracti128_si256(v, 1), _mm_set1_epi32(0xFFFF));
+    _mm_storeu_si128((__m128i*)p, _mm_packus_epi32(lo, hi));
+#elif defined(NSIMD_SSE4)
+    __m128i lo = _mm_and_si128(v, _mm_set1_epi32(0xFFFF));
+    _mm_storel_epi64((__m128i*)p, _mm_packus_epi32(lo, _mm_setzero_si128()));
+#elif defined(NSIMD_NEON)
+    vst1_s64((int64_t*)p, vreinterpret_s64_s16(vmovn_s32(v)));
+#else
+    int tmp[NSIMD_WIDTH];
+    n_store_epi32(tmp, v);
+    for (int i = 0; i < NSIMD_WIDTH; i++) p[i] = (short)tmp[i];
+#endif
+}
+
+// ============================================================
 // Broadcast (scalar -> vector)
 // ============================================================
 static inline n_float n_set1_ps(float s) {

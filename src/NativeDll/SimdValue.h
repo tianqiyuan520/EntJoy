@@ -356,6 +356,66 @@ struct simd_value<int> {
 // ============================================================
 
 /// <summary>
+/// Narrow-integer truncation in the vector domain: 对应 C# 的 (byte)/(sbyte)/(ushort)/(short)。
+/// 值仍以 int32 lane 承载，截断 + 符号扩展在这里做，避免把 simd 值 C 风格转型成标量。
+/// </summary>
+static inline simd_value<int> simd_trunc_u8(simd_value<int> v) {
+#if defined(NSIMD_AVX512)
+    return simd_value<int>{ _mm512_and_si512(v.v, _mm512_set1_epi32(0xFF)) };
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return simd_value<int>{ _mm256_and_si256(v.v, _mm256_set1_epi32(0xFF)) };
+#elif defined(NSIMD_SSE4)
+    return simd_value<int>{ _mm_and_si128(v.v, _mm_set1_epi32(0xFF)) };
+#else
+    int tmp[NSIMD_WIDTH]; v.store(tmp);
+    for (int i = 0; i < NSIMD_WIDTH; i++) tmp[i] = (unsigned char)tmp[i];
+    return simd_value<int>::load(tmp);
+#endif
+}
+
+static inline simd_value<int> simd_trunc_s8(simd_value<int> v) {
+#if defined(NSIMD_AVX512)
+    return simd_value<int>{ _mm512_srai_epi32(_mm512_slli_epi32(v.v, 24), 24) };
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return simd_value<int>{ _mm256_srai_epi32(_mm256_slli_epi32(v.v, 24), 24) };
+#elif defined(NSIMD_SSE4)
+    return simd_value<int>{ _mm_srai_epi32(_mm_slli_epi32(v.v, 24), 24) };
+#else
+    int tmp[NSIMD_WIDTH]; v.store(tmp);
+    for (int i = 0; i < NSIMD_WIDTH; i++) tmp[i] = (signed char)tmp[i];
+    return simd_value<int>::load(tmp);
+#endif
+}
+
+static inline simd_value<int> simd_trunc_u16(simd_value<int> v) {
+#if defined(NSIMD_AVX512)
+    return simd_value<int>{ _mm512_and_si512(v.v, _mm512_set1_epi32(0xFFFF)) };
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return simd_value<int>{ _mm256_and_si256(v.v, _mm256_set1_epi32(0xFFFF)) };
+#elif defined(NSIMD_SSE4)
+    return simd_value<int>{ _mm_and_si128(v.v, _mm_set1_epi32(0xFFFF)) };
+#else
+    int tmp[NSIMD_WIDTH]; v.store(tmp);
+    for (int i = 0; i < NSIMD_WIDTH; i++) tmp[i] = (unsigned short)tmp[i];
+    return simd_value<int>::load(tmp);
+#endif
+}
+
+static inline simd_value<int> simd_trunc_s16(simd_value<int> v) {
+#if defined(NSIMD_AVX512)
+    return simd_value<int>{ _mm512_srai_epi32(_mm512_slli_epi32(v.v, 16), 16) };
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return simd_value<int>{ _mm256_srai_epi32(_mm256_slli_epi32(v.v, 16), 16) };
+#elif defined(NSIMD_SSE4)
+    return simd_value<int>{ _mm_srai_epi32(_mm_slli_epi32(v.v, 16), 16) };
+#else
+    int tmp[NSIMD_WIDTH]; v.store(tmp);
+    for (int i = 0; i < NSIMD_WIDTH; i++) tmp[i] = (short)tmp[i];
+    return simd_value<int>::load(tmp);
+#endif
+}
+
+/// <summary>
 /// SIMD unsigned integer modulo with constant divisor.
 /// For power-of-2 divisors, uses bit mask. Otherwise uses unsigned modulo.
 /// </summary>

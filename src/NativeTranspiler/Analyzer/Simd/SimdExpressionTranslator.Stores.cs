@@ -88,10 +88,10 @@ namespace NativeTranspiler.Analyzer
             string storeFnScalar = elemType == "float" ? "n_store_ps" : "n_store_epi32";
             string setFnScalar = elemType == "float" ? "n_set1_ps" : "n_set1_epi32";
 
-            // 非 float/int 元素（byte/sbyte/float2/结构体…）：向量 store 的 intrinsic 签名只覆盖
-            //   float*/int*。这里统一走"逐 lane 标量写"，按元素类型正确转换指针，
-            //   掩码语义与其他路径一致（不再生成 `(int*)(byte_ptr)[i] = <float2>` 这类非法赋值）。
-            bool isNarrowElem = elemType != "float" && elemType != "int";
+            // 元素类别统一决定写回路径：32 位标量走向量 store（连续或 scatter），
+            //   窄整数走"连续 pack store / 逐 lane"，pair 与结构体仍逐 lane。
+            SimdElemClass elemClass = SimdVectorTypes.ClassifyElem(elemType);
+            bool isNarrowElem = elemClass != SimdElemClass.Lane32;
             // 2 分量向量元素：写回要按两个分量各自取 lane 再构造（float2/int2/uint2 同形）。
             bool pairElem = SimdVectorTypes.IsPair(elemType);
             string pairExtract = SimdVectorTypes.IsFloat2(elemType) ? "n_extract_lane_f32" : "n_extract_lane_epi32";
@@ -107,6 +107,19 @@ namespace NativeTranspiler.Analyzer
                     return $"/*{UnsupportedMarkers.Expr}SIMD_StructCompoundAssign*/ 0";
                 string elemPtr = $"(({elemType}*)({basePtr}))";
                 bool narrowedCmp = !_currentMask.IsAllTrue;
+                // 窄整数 + 连续下标 + 无掩码：扩宽 load → 运算 → pack store。
+                //   移位复合（<<=/>>=）不走这里：右移在 uint 上用的是专用 helper，不保证有运算符重载。
+                if (elemClass == SimdElemClass.NarrowInt && !narrowedCmp && _returnedMaskVar.IsEmpty
+                    && compoundOp is "+=" or "-=" or "*=" or "&=" or "|=" or "^="
+                    && indexSyntax != null
+                    && SimdVectorTypes.NarrowLoadFn(elemType) is { } widenFn
+                    && SimdVectorTypes.NarrowStoreFn(elemType) is { } packFn
+                    && TryResolveContiguousOffset(indexSyntax, out string compoundOffset))
+                {
+                    string opText = compoundOp.Substring(0, compoundOp.Length - 1);
+                    string loaded = $"simd_value<int>{{ {widenFn}((const {elemType}*)({basePtr}) + {compoundOffset}) }}";
+                    return $"{{ simd_value<int> __narrow = {loaded}; {packFn}(({elemType}*)({basePtr}) + {compoundOffset}, (__narrow {opText} ({rhsExpr})).v); }}";
+                }
                 if (idxKind >= VarKind.Varying)
                 {
                     string laneRhs = rhsKind >= VarKind.Varying
@@ -124,6 +137,18 @@ namespace NativeTranspiler.Analyzer
 
             if (isNarrowElem)
             {
+                // 窄整数 + 连续下标 + 无掩码：整宽 pack store（截断取低位，等价于 C# 的 (byte)/(short)）。
+                if (elemClass == SimdElemClass.NarrowInt
+                    && _currentMask.IsAllTrue && _returnedMaskVar.IsEmpty
+                    && indexSyntax != null
+                    && SimdVectorTypes.NarrowStoreFn(elemType) is { } packFn
+                    && TryResolveContiguousOffset(indexSyntax, out string packOffset))
+                {
+                    string packValue = rhsKind >= VarKind.Varying
+                        ? $"{CppIntegerSemantics.MemberOperand(rhsExpr)}.v"
+                        : $"n_set1_epi32((int)({rhsExpr}))";
+                    return $"{packFn}(({elemType}*)({basePtr}) + {packOffset}, {packValue})";
+                }
                 bool narrowed = !_currentMask.IsAllTrue;
                 string guard = narrowed ? $"if((n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m)&(1<<__l))!=0)" : "";
                 string ep = $"(({elemType}*)({basePtr}))";
@@ -184,18 +209,12 @@ namespace NativeTranspiler.Analyzer
                     string contOffset = null;
                     if (!string.IsNullOrEmpty(_batchLoopVar))
                     {
-                        if (idxExpr == _simdIndexVar)
-                            contBase = _batchLoopVar;
-                        else
+                        // 连续下标：`v_i` / `常量 + v_i` / `v_i ± 标量`（与 load 侧共用同一判定）。
+                        if (indexSyntax != null && TryResolveContiguousOffset(indexSyntax, out string resolvedOffset))
                         {
-                            string suffix = $"+ {_simdIndexVar}";
-                            if (idxExpr.EndsWith(suffix))
-                                contBase = idxExpr.Substring(0, idxExpr.Length - suffix.Length).Trim();
-                            else if (idxExpr.EndsWith($"+ {_simdIndexVar})"))
-                                contBase = idxExpr.Substring(0, idxExpr.Length - ($"+ {_simdIndexVar})").Length).Trim().TrimStart('(');
+                            contBase = _batchLoopVar;
+                            contOffset = resolvedOffset;
                         }
-                        if (contBase != null)
-                            contOffset = contBase == _batchLoopVar ? contBase : $"({contBase}) + {_batchLoopVar}";
                     }
                     else if (idxExpr == _simdIndexVar && _batchOffsetVar != SimdControlFlowGenerator.UnknownBatchOffset)
                     {
@@ -228,13 +247,15 @@ namespace NativeTranspiler.Analyzer
                             return $"{{int __sg=n_mask_to_bitmask(n_not_mask({_returnedMaskVar}.m));for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{basePtr}[n_extract_lane_epi32({idxExpr}.v,__l)]={(elemType == "float" && IsInt32Expr(assign.Right) ? $"n_extract_lane_i2f({CppIntegerSemantics.MemberOperand(rhsSimdExpr)}.v,__l)" : $"{extractFn}({rhsSimdExpr}.v,__l)")};}}}}}}";
                         }
                         string storeFn = elemType == "float" ? "n_store_ps" : "n_store_epi32";
+                        // uint 与 int 同宽同布局：store intrinsic 只收 int*，按位重解释即可。
+                        string storeBase = elemType == "unsigned int" ? $"(int*)({basePtr})" : basePtr;
                         // 均匀 RHS + 连续索引：整宽 set1 + 无掩码 store（真正的向量化路径）
                         if (rhsKind < VarKind.Varying)
-                            return $"{storeFnScalar}({basePtr} + {contOffset}, {setFnScalar}({rhsExpr}))";
+                            return $"{storeFnScalar}({storeBase} + {contOffset}, {setFnScalar}({rhsExpr}))";
                         // int→float 跨类型写回：向量转换 + 向量 store（避免 scatter）
                         if (elemType == "float" && IsInt32Expr(assign.Right))
-                            return $"{storeFn}({basePtr} + {contOffset}, n_cvtepi32_ps({rhsExpr}.v))";
-                        return $"{storeFn}({basePtr} + {contOffset}, {rhsExpr}.v)";
+                            return $"{storeFn}({storeBase} + {contOffset}, n_cvtepi32_ps({rhsExpr}.v))";
+                        return $"{storeFn}({storeBase} + {contOffset}, {rhsExpr}.v)";
                     }
 
                     // 非连续 varying 下标：逐 lane scatter。

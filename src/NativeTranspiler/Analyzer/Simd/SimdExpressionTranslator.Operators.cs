@@ -297,6 +297,11 @@ namespace NativeTranspiler.Analyzer
             if (innerKind >= VarKind.Varying && targetIsUint)
                 return $"{inner}";
 
+            // 窄整数 cast：在向量域内截断（(byte)/(sbyte)/(ushort)/(short)），
+            // 值仍留在 int32 lane，避免生成 `(unsigned char)(simd_value<int>)`。
+            if (innerKind >= VarKind.Varying && SimdVectorTypes.NarrowTruncFn(targetCppType) is { } truncFn)
+                return $"{truncFn}({inner})";
+
             // SIMD type conversions: (int2)simd_value<float2> → simd_value<int2>::convert(...)
             if (innerKind >= VarKind.Varying)
             {

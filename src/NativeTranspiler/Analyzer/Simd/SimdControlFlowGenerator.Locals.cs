@@ -166,7 +166,7 @@ namespace NativeTranspiler.Analyzer
                 if (variable.Initializer?.Value is ElementAccessExpressionSyntax structInitEA
                     && structInitEA.Expression is IdentifierNameSyntax structInitArrId
                     && _nativeArrayParams.TryGetValue(structInitArrId.Identifier.Text, out var structInitElemType)
-                    && structInitElemType != "float" && structInitElemType != "int"
+                    && !IsBuiltinScalarElem(structInitElemType)
                     && !SimdVectorTypes.IsPair(structInitElemType))
                 {
                     ExpressionSyntax? idxSyntax = structInitEA.ArgumentList?.Arguments.Count > 0
@@ -234,10 +234,12 @@ namespace NativeTranspiler.Analyzer
                             }
                         }
                         AppendLine($"{cppType} {name} = {initExpr};");
+                        _scalarUniformNames.Add(name);
                     }
                     else
                     {
                         AppendLine($"{cppType} {name};");
+                        _scalarUniformNames.Add(name);
                     }
                 }
             }

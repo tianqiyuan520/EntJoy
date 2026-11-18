@@ -116,7 +116,10 @@ namespace NativeTranspiler.Analyzer
                     //   as the lane tracker so break can drop matched lanes and keep matching
                     //   others (see GenerateBreakStatement).
                     _loopStack.Push(new LoopFrame { TrackerVar = loopSavedMask, IterActiveVar = "", ExitLabel = exitL, ContinueLabel = contL, BodyMaskVar = bodyMaskB });
+                    // 标量循环变量在 C++ 里就是 `int <ivName>`：登记后下标 `v_i ± <ivName>` 可判连续。
+                    bool ivAdded = _uniformLoopVars.Add(ivName);
                     GenerateStatement(stmt.Statement);
+                    if (ivAdded) _uniformLoopVars.Remove(ivName);
                     _loopStack.Pop();
                     _isUniformScalarLoop = outerScalarLoop;
                     if (_gotoTargets.Contains(contL))
@@ -229,7 +232,11 @@ namespace NativeTranspiler.Analyzer
                 bool outerScalarLoop = _isUniformScalarLoop;
                 _isUniformScalarLoop = false;
 
+                bool hadConstant = _uniformIterationConstants.TryGetValue(ivName, out int previousConstant);
+                _uniformIterationConstants[ivName] = i;
                 GenerateStatement(stmt.Statement);
+                if (hadConstant) _uniformIterationConstants[ivName] = previousConstant;
+                else _uniformIterationConstants.Remove(ivName);
 
                 _isUniformScalarLoop = outerScalarLoop;
                 if (hasBreak || hasContinue)
