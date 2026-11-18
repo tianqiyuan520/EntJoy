@@ -53,9 +53,6 @@ namespace NativeTranspiler.Analyzer
         public static readonly DiagnosticDescriptor UseIspcMtRequiresIspcBackendError = new("NT022", "UseISPC_MT requires Ispc backend", "[NativeTranspile] struct '{0}' sets UseISPC_MT but Target is not Ispc; the multi-task ISPC variant is only generated for the ISPC backend.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor IspcMtEntityUnsupportedError = new("NT037", "IJobEntity does not support UseISPC_MT", "[NativeTranspile] struct '{0}' is an IJobEntity with UseISPC_MT: the multi-task ISPC variant is not generated for entity jobs, so the job registers symbols that never exist and fails at load time. Drop UseISPC_MT, or convert the job to IJobChunk.", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
-        /// <summary>F-6：SimdMathPrecision.High 没有实现（产物与 IEEE 逐字相同），不能让人以为拿到了更快的 1.0ULP 路径。</summary>
-        public static readonly DiagnosticDescriptor SimdMathPrecisionHighUnimplementedWarning = new("NT023", "SimdMathPrecision.High has no SIMD implementation", "[NativeTranspile] struct '{0}' sets MathPrecision = High, but only Fastest has a SIMD implementation: the emitted code is identical to MathPrecision = IEEE (per-lane scalar). Use Fastest for the AVX2/AVX512 inline polynomial, or IEEE to state the intent explicitly.", "NativeTranspiler", DiagnosticSeverity.Warning, true);
-
         /// <summary>F-2 / B3：AutoSIMD.Enabled 在 IJobParallelFor/IJobFor/IJob 上实测无收益（更慢）⇒
         /// 默认 error，要开必须显式声明"我已量过"（MSBuild 属性 <c>EntJoyAutoSimdMeasured=true</c>，
         /// 由 EntJoy.Jobs.props 的 CompilerVisibleProperty 传入）。原来只是 warning ⇒ 用户照样能开一个
@@ -203,7 +200,7 @@ namespace NativeTranspiler.Analyzer
                 }
             }
 
-            // NT-05：只有 error 才算校验失败。NT023/NT024（事实告知类 warning）不得把 job 判成
+            // NT-05：只有 error 才算校验失败。NT028/NT032（事实告知类 warning）不得把 job 判成
             // "无效" —— 文档 末尾承诺「warning 不阻断生成」，而调用方（NativeTranspilerGenerator）
             // 用返回值决定是否把 job 摘出 validJobs，返回 true 却被摘掉会直接吞掉 Schedule 绑定（CS0103 + NT028）。
             return !diagnostics.Any(d => d.Severity == DiagnosticSeverity.Error);
@@ -318,15 +315,9 @@ namespace NativeTranspiler.Analyzer
                     diagnostics.Add(Diagnostic.Create(UseIspcMtRequiresIspcBackendError,
                         structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
                 }
-                // 精度档只决定向量路径用哪套实现：未向量化的 job 直接调 libm，档位不生效。
-                // 只警告不报错：产物本身正确，只是设置没起作用。
-                if (autoSimd == NativeTranspiler.AutoSIMD.Disabled
-                    && AttributeHelper.GetMathPrecision(structSymbol, attrSymbol) != NativeTranspiler.SimdMathPrecision.Fastest
-                    && target == NativeTranspiler.BackendTarget.Cpp)
-                {
-                    diagnostics.Add(Diagnostic.Create(SimdMathPrecisionHighUnimplementedWarning,
-                        structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
-                }
+                // 精度档对向量段与标量段同时生效：标量段经 EJ_* 在 Fastest/High 走内联内核，
+                // IEEE 才调 libm（NativeSIMD_math.h 的 SIMD_MATH_PRECISION 分派）。因此不存在
+                // “设了 MathPrecision 但没生效”的形态，无需诊断。
                 // F-2 / B3：AutoSIMD.Enabled 在本 job 形态上实测无收益（详见描述）⇒ 默认 error；
                 // 显式声明"我已量过"（EntJoyAutoSimdMeasured=true）才放行。
                 if (autoSimd == NativeTranspiler.AutoSIMD.Enabled && !isChunkJob && !isEntityJob && !autoSimdMeasured)

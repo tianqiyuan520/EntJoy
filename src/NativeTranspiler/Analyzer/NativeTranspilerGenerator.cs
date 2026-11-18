@@ -113,7 +113,7 @@ namespace NativeTranspiler.Analyzer
                     }
                 }
                 // 诊断一律上报；只有 Error 才终止生成。
-                // （NT023/NT024 是"事实告知"类 Warning —— 既不能憋着不报，也不能因为它们而整个项目不生成产物。）
+                // （NT028/NT032 是"事实告知"类 Warning —— 既不能憋着不报，也不能因为它们而整个项目不生成产物。）
                 foreach (var diag in allErrors) spc.ReportDiagnostic(diag);
                 // E-1（DX 修复）：单个 job 的校验错误不再终止整批生成。
                 // 旧行为是"只要有 job 校验失败 → 整个 NativeTranspiler.Bindings.g.cs 不产出"，

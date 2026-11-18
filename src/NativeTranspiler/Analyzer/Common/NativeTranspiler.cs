@@ -38,9 +38,9 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>
-        /// SIMD 数学函数精度等级。
-        /// ⚠ 事实：Sleef 已从 NativeDll 移除，目前只有 Fastest 有 SIMD 实现
-        /// 选 `High` 会得到一条 NT023 警告（见 NativeTranspileValidator）。
+        /// SIMD 数学函数精度等级，映射为每个翻译单元的 `#define SIMD_MATH_PRECISION 1|2|3`。
+        /// 三档都有实现：Fastest 是 float 域多项式（≈3.5 ULP），High 是 double lane 实现（≈1 ULP，
+        /// SSE4.1 无 FMA 时退回 float 域），IEEE 逐 lane 调 libm。向量段与标量段共用同一套内核。
         /// </summary>
         public enum SimdMathPrecision
         {
