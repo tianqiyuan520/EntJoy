@@ -93,9 +93,7 @@ namespace NativeTranspiler.Analyzer
             // IJobChunk: 生成独立 Execute 函数
             if (IsChunkJob(jobStruct))
             {
-                if (autoSIMD == NativeTranspiler.AutoSIMD.Vectorize)
-                    GenerateChunkFunctionVectorize(jobStruct, compilation, sb, useFastMath);
-                else if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
+                if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
                     GenerateChunkFunctionSIMD(jobStruct, compilation, sb, useFastMath, simdMathPrecision);
                 else
                     GenerateChunkFunctionStandard(jobStruct, compilation, sb, useFastMath);
@@ -103,9 +101,7 @@ namespace NativeTranspiler.Analyzer
             // IJobEntity：生成独立的 Chunk 级 Execute 函数（与 IJobChunk 一致）
             else if (IsEntityJob(jobStruct))
             {
-                if (autoSIMD == NativeTranspiler.AutoSIMD.Vectorize)
-                    GenerateEntityFunctionVectorize(jobStruct, compilation, sb, useFastMath);
-                else if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
+                if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
                     GenerateEntityFunctionStandard(jobStruct, compilation, sb, useFastMath);
                 else
                     GenerateEntityChunkFunctionStandard(jobStruct, compilation, sb, useFastMath);

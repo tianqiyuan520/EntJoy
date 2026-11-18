@@ -183,23 +183,24 @@ public struct PlainJob : IJobParallelFor
         [Fact]
         public void ErrorJob_IsStillExcludedFromBindings()
         {
-            // 反向守卫：真正的 error（这里用 Vectorize + 非 chunk/entity job ⇒ NT018）仍必须
+            // 反向守卫：真正的 error（这里用 AutoSIMD.Enabled + 不可向量化构造 ⇒ NT031）仍必须
             // 把该 job 排除出绑定集，并报 NT028 —— 修 warning 门控不得顺手放过 error。
             var result = GeneratorHarness.EmitFor(@"
+using System.Threading;
 using NativeTranspiler;
 using EntJoy.JobSystem;
 using EntJoy.Collections;
 
-[NativeTranspile(AutoSIMD = AutoSIMD.Vectorize)]
-public struct VectorizeOnParallelForJob : IJobParallelFor
+[NativeTranspile(AutoSIMD = AutoSIMD.Enabled)]
+public struct AtomicVectorizeJob : IJobParallelFor
 {
     public NativeArray<float> Out;
-    public void Execute(int index) { Out[index] = 1.0f; }
+    public void Execute(int index) { Interlocked.Increment(ref Out[index]); }
 }
 ");
             _out.WriteLine(result.DiagnosticSummary);
-            Assert.True(result.HasDiagnostic("NT018"), GeneratorHarness.Fail(result, "预期 NT018（error）出现"));
-            Assert.DoesNotContain("Schedule_VectorizeOnParallelForJob", result.Bindings);
+            Assert.True(result.HasDiagnostic("NT031"), GeneratorHarness.Fail(result, "预期 NT031（error）出现"));
+            Assert.DoesNotContain("Schedule_AtomicVectorizeJob", result.Bindings);
         }
     }
 

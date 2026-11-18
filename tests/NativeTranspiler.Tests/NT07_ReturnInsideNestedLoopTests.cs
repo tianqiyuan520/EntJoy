@@ -54,35 +54,6 @@ public struct EntityNestedReturnJob : IJobEntity
         }
 
         [Fact]
-        public void EntityVectorize_NestedLoopReturn_EmitsUnsupportedMarker()
-        {
-            // IJobEntity + AutoSIMD.Vectorize → GenerateEntityFunctionVectorize
-            var result = GeneratorHarness.EmitFor(@"
-using NativeTranspiler;
-using EntJoy.ECS;
-
-public struct LNest2 { public float Marker; public float V; }
-
-[NativeTranspile(AutoSIMD = AutoSIMD.Vectorize)]
-public struct VectorizeNestedReturnJob : IJobEntity
-{
-    public void Execute(ref LNest2 p)
-    {
-        for (int k = 0; k < 4; k = k + 1)
-        {
-            if (p.V < 0.0f) return;
-            p.V = p.V + 1.0f;
-        }
-        p.Marker = p.Marker + 1.0f;
-    }
-}
-");
-            _out.WriteLine(result.Cpp);
-            Assert.True(result.Cpp.Contains(Marker),
-                GeneratorHarness.Fail(result, "Vectorize 路径的嵌套循环 return; 也必须写标记"));
-        }
-
-        [Fact]
         public void PerLaneSimd_NestedLoopReturn_EmitsUnsupportedMarker()
         {
             // IJobParallelFor + AutoSIMD.Enabled，体内"varying 边界循环"⇒ GeneratePerLaneFullBody

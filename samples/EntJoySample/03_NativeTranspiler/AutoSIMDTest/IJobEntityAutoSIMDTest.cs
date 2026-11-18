@@ -1,4 +1,4 @@
-// IJobEntity + AutoSIMD=Vectorize 正确性测试
+// IJobEntity + AutoSIMD=Disabled 正确性测试
 // 验证：请求编译器自动向量化的 IJobEntity 计算结果与 C# 标量版本一致。
 // 覆盖 Light（纯乘加，无 fast-math 容差）与 Heavy（16×sin/cos，_n_sin_avx2 ~3.5ULP）两种场景。
 // 同时覆盖无 AutoSIMD 的 CPP IJobEntity 与 IJobChunk（对照 baseline）。
@@ -47,8 +47,8 @@ namespace EntJoySample.AutoSIMDTest
         public float2 Value;
     }
 
-    // Light IJobEntity: AutoSIMD=Vectorize（被测目标）
-    [NativeTranspile(AutoSIMD = AutoSIMD.Vectorize)]
+    // Light IJobEntity: AutoSIMD=Disabled（被测目标）
+    [NativeTranspile(AutoSIMD = AutoSIMD.Disabled)]
     public struct LightJobEntityAutoSIMD : IJobEntity
     {
         public float DeltaTime;
@@ -58,8 +58,8 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // Heavy IJobEntity: AutoSIMD=Vectorize（被测目标）
-    [NativeTranspile(AutoSIMD = AutoSIMD.Vectorize)]
+    // Heavy IJobEntity: AutoSIMD=Disabled（被测目标）
+    [NativeTranspile(AutoSIMD = AutoSIMD.Disabled)]
     public struct HeavyJobEntityAutoSIMD : IJobEntity
     {
         public float DeltaTime;

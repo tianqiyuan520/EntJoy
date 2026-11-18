@@ -63,7 +63,7 @@
 - 原生关系筛选在 Chunk、Range 和紧凑 EntityBatch 入口按实体匹配，并与 Enabled 条件取交集。关系位图在调度时复制，Enabled 位图在依赖完成后读取；本次过滤缓冲保留到 Job 完成。零匹配 Chunk 不执行，IJobChunk 每个非空物理 Chunk 调用一次并读取传入掩码，IJobEntity 自动过滤。含关系的原生查询保守登记生命周期依赖；重绑后重新构建过滤数据。
 - 托管列表也支持 WithRelationship 的精确筛选，位图在调度时按旁表生成；原生内核不访问托管列表。列表类型不能作为 Execute 的关系列参数；单组件关系查询的 ReadOnlyComp1 对列表明确拒绝，业务组件仍可枚举。定长列提供只读参数及 Chunk 访问。
 - `GetRelationships(source, Span)`、`CopyRelationships(source, NativeList)` 提供正向目标副本，与反向复制使用相同拥有关系。NativeArray.ReadOnly 字段支持 C++/ISPC 数组 Job，只读借用保留到 Job 完成；GetUnsafeReadOnlyPtr 的调用方负责寿命、同步与只读约定。
-- 手写原生 IJobChunk 支持 Length/IsEnabled/位图读取，C++ 支持范围遍历，ISPC 使用受支持的实体循环。显式掩码访问与 AutoSIMD.Enabled 的组合报 NT031；使用 Disabled 或编译器 Vectorize。NativeDll 与 NativeTranspiled 的 ABI 均为 4，生成内核必须与运行时一致，不匹配时拒绝加载。
+- 手写原生 IJobChunk 支持 Length/IsEnabled/位图读取，C++ 支持范围遍历，ISPC 使用受支持的实体循环。显式掩码访问与 AutoSIMD.Enabled 的组合报 NT031；改用 AutoSIMD.Disabled。NativeDll 与 NativeTranspiled 的 ABI 均为 4，生成内核必须与运行时一致，不匹配时拒绝加载。
 - ECB 提供 SetRelationshipTarget/RemoveRelationship，主线程及托管 Job 可记录；ParallelWriter 版本要求 sortKey。目标设置保留已有业务数据，解除移除列；回放重新校验端点及约束，已失效的 source 跳过。普通并行命令的 key 为 0；同 writer、同 key 保持记录顺序，相同 key 的跨 writer 冲突不承诺胜者。C++/ISPC 内核的 ParallelWriter 方法不做自动转译。
 - ECB 的 AddRelationship 对单目标建立/重绑，对多目标追加；带 target 的 RemoveRelationship 删除一条多目标边，ClearRelationships 清空全部多目标边。无 target 的 RemoveRelationship 对多目标清空边、保留定长列。ParallelWriter 提供对应的 sortKey 重载，沿用每命令提交和失败批次消费规则。
 - Playback/PlaybackParallel 先在记录锁外等待 EntityManager 已跟踪的 Job，再捕获并消费一批记录；外部 Task 或独立记录 Job 由调用方先完成。命令失败抛 CommandPlaybackException，报告失败下标、writer 下标及后续未执行数；已提交前缀不隐式重放。Observer 新记录的命令留到下一次回放；禁止嵌套回放、在回放中释放 ECB 或移动 writer 表。

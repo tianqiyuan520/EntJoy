@@ -31,7 +31,7 @@ namespace NativeTranspiler.Analyzer
         public static readonly DiagnosticDescriptor ManagedEventTypeError = new("NT015", "Managed event type", "[NativeTranspile] SendEvent<{0}>(): event type must be unmanaged (blittable). Managed types are not supported in native jobs. Use a blittable signal struct instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor UnsupportedStructLayoutError = new("NT016", "Unsupported struct layout for ISPC", "[NativeTranspile] struct '{0}' uses {1} which ISPC cannot represent (ISPC does not support #pragma pack); NativeArray<{0}> layout would misalign. Use Sequential default layout (no Pack < 8, no Explicit).", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor MultiRelationAccessError = new("NT017", "Multi-relation access in native job", "[NativeTranspile] '{0}' cannot access [RelationshipComponent(Multiple = true)] relation type '{1}'. Multi-relation data is stored in managed lists on the main thread and is not readable from native jobs. Use main-thread APIs, an owned target copy, or a fixed-capacity relationship column.", "NativeTranspiler", DiagnosticSeverity.Error, true);
-        public static readonly DiagnosticDescriptor VectorizeRequiresChunkOrEntityError = new("NT018", "AutoSIMD.Vectorize requires IJobChunk/IJobEntity", "[NativeTranspile] struct '{0}' sets AutoSIMD = Vectorize but is not an IJobChunk/IJobEntity; the Vectorize path is only implemented for those two, so the flag is silently dropped. Use AutoSIMD = Enabled for IJobParallelFor/IJobFor/IJob.", "NativeTranspiler", DiagnosticSeverity.Error, true);
+
         public static readonly DiagnosticDescriptor AutoSimdRequiresCppBackendError = new("NT019", "AutoSIMD requires Cpp backend", "[NativeTranspile] struct '{0}' sets AutoSIMD = Enabled together with Target = Ispc; the ISPC backend never reads AutoSIMD (it vectorizes via foreach/gang), so the flag is silently dropped. Drop AutoSIMD, or switch Target to Cpp.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor MathPrecisionRequiresCppBackendError = new("NT020", "MathPrecision requires Cpp backend", "[NativeTranspile] struct '{0}' sets MathPrecision but Target is not Cpp; per-job precision is emitted as a '#define SIMD_MATH_PRECISION' only into the C++ translation unit. ISPC precision is controlled by IspcMathLib instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
@@ -276,17 +276,10 @@ namespace NativeTranspiler.Analyzer
             else
             {
                 // 属性组合校验（C2）
-                // 落到 else if (IsParallelForJob || IsForJob) / 兜底分支，Vectorize 被静默丢弃，
-                // 用户以为开了向量化其实没有。这里直接报错而不是放任。
                 var attrSymbol = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
                 var target = AttributeHelper.GetBackendTarget(structSymbol, attrSymbol);
                 var autoSimd = AttributeHelper.GetAutoSIMD(structSymbol, attrSymbol);
 
-                if (autoSimd == NativeTranspiler.AutoSIMD.Vectorize && !isChunkJob && !isEntityJob)
-                {
-                    diagnostics.Add(Diagnostic.Create(VectorizeRequiresChunkOrEntityError,
-                        structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
-                }
                 // AutoSIMD.Enabled 是 Cpp 后端专有：ISPC 路径用 foreach/gang 自带向量化，
                 // 该标志在 ISPC 下无任何读取点（静默丢弃）。
                 if (autoSimd == NativeTranspiler.AutoSIMD.Enabled && target == NativeTranspiler.BackendTarget.Ispc)
@@ -418,7 +411,7 @@ namespace NativeTranspiler.Analyzer
                     diagnostics.Add(Diagnostic.Create(AutoSimdFallsBackToPerLaneError,
                         executeMethod.Locations.FirstOrDefault() ?? structSymbol.Locations.FirstOrDefault(),
                         structSymbol.Name, NativeTranspiler.AutoSIMD.Enabled,
-                        "IJobEntity AutoSIMD.Enabled emits a scalar entity body; use Disabled or Vectorize"));
+                        "IJobEntity AutoSIMD.Enabled emits a scalar entity body; use Disabled"));
             }
 
             // B3（①）：AutoSIMD 开着、但 body 命中发射侧"不可向量化"判据 ⇒ 整个 body 退回 per-lane
@@ -443,9 +436,8 @@ namespace NativeTranspiler.Analyzer
                                 semanticModelSimd.GetSymbolInfo(identifier).Symbol is IParameterSymbol parameter
                                 && parameter.Type.ToDisplayString() == Config.TypeChunkEnabledMask))
                             diagnostics.Add(Diagnostic.Create(AutoSimdFallsBackToPerLaneError, executeMethod.Locations.FirstOrDefault(),
-                                structSymbol.Name, autoSimdBody, "explicit ChunkEnabledMask access requires the scalar or compiler Vectorize path"));
-                        else if (SimdVectorizability.HasNonVectorizableCall(methodSyntax.Body, varAnalyzer, out var reason,
-                            compilerVectorize: autoSimdBody == NativeTranspiler.AutoSIMD.Vectorize))
+                                structSymbol.Name, autoSimdBody, "explicit ChunkEnabledMask access is only supported on the scalar path; use AutoSIMD = Disabled"));
+                        else if (SimdVectorizability.HasNonVectorizableCall(methodSyntax.Body, varAnalyzer, out var reason))
                         {
                             diagnostics.Add(Diagnostic.Create(AutoSimdFallsBackToPerLaneError,
                                 executeMethod.Locations.FirstOrDefault() ?? structSymbol.Locations.FirstOrDefault(),

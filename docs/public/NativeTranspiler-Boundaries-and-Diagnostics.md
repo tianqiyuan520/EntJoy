@@ -93,7 +93,7 @@
 
 - 支持：`Target = Cpp` + `AutoSIMD.Disabled`（默认）。调度走 `ScheduleParallelForBatchRaw`，
   绑定层与 `IJobParallelFor` 同一形态：`job.Schedule(arrayLength, innerBatchCount)`。
-- 不支持：`Target = Ispc`、`AutoSIMD = Enabled/Vectorize`（这些路径只认逐 index 的 `Execute(int)` 形态）
+- 不支持：`Target = Ispc`、`AutoSIMD = Enabled`（这些路径只认逐 index 的 `Execute(int)` 形态）
   ⇒ 报 **NT025**（error），而不是静默按别的形态生成。
 - 为什么值得用：调度粒度是这批 job 的性能主导项。逐 index 任务（`IJobParallelFor` + `batchSize=0`
   的自动分块）在 1M 元素上约 140ms 的调度开销；改成"少数任务各跑一段"后实测降到 ~11ms。
@@ -104,10 +104,10 @@
 |---|---|---|
 | NT008 | error | 未实现任何 Job 接口（消息列出全部允许的接口，含 `IJobParallelForBatch`） |
 | NT003 / NT006 | error | 局部数组/托管类型、引用类型静态字段等**语言能力边界**，消息里给出替代写法（NativeArray/UnsafeList 传入、if/else 或静态查表代替 `switch` 表达式） |
-| NT018 | error | `AutoSIMD = Vectorize` 但 job 不是 `IJobChunk`/`IJobEntity`（该路径未实现，会被静默丢弃） |
+
 | NT019 / NT020 / NT021 / NT022 | error | 属性与后端不匹配（ISPC 不读 AutoSIMD / MathPrecision / CppMathLib / UseISPC_MT） |
 | **NT024** | **error**（2026-09-27 由 warning 升级） | `AutoSIMD = Enabled`（IJobParallelFor/IJobFor/IJob）：实测整步比标量基线**慢 ~10%** ⇒ 默认不许开。要开必须**显式声明已量过**：MSBuild 属性 `<EntJoyAutoSimdMeasured>true</EntJoyAutoSimdMeasured>`（由 `EntJoy.Jobs.props` 的 `CompilerVisibleProperty` 传给分析器）。job 被排除后调用点会报 CS0103 —— 这是故意的"响亮失败" |
-| **NT031** | error | `AutoSIMD = Enabled/Vectorize`（Cpp 后端）但 body 命中发射侧"不可向量化"判据（`Interlocked.*` / `UnsafeUtility.ArrayElementAsRef` / 用户静态辅助函数被喂 varying 实参 / 裸指针 + varying 下标 + 宽元素 / `for` 循环控制不符合下述契约）⇒ 整个 body 退回 **per-lane 标量循环**（产物正确但**一点 SIMD 都没有**）。判据与发射侧共用同一份实现（`SimdVectorizability.HasNonVectorizableCall`），报错信息里指名具体构造。要么去掉该构造，要么显式 `AutoSIMD = Disabled` 说明"标量是有意为之"。`IJobEntity + AutoSIMD.Enabled` 当前生成标量实体体，直接报 NT031；`Disabled` 和 `Vectorize` 保持各自现有路径 |
+| **NT031** | error | `AutoSIMD = Enabled`（Cpp 后端）但 body 命中发射侧"不可向量化"判据（`Interlocked.*` / `UnsafeUtility.ArrayElementAsRef` / 用户静态辅助函数被喂 varying 实参 / 裸指针 + varying 下标 + 宽元素 / `for` 循环控制不符合下述契约）⇒ 整个 body 退回 **per-lane 标量循环**（产物正确但**一点 SIMD 都没有**）。判据与发射侧共用同一份实现（`SimdVectorizability.HasNonVectorizableCall`），报错信息里指名具体构造。要么去掉该构造，要么显式 `AutoSIMD = Disabled` 说明"标量是有意为之"。`IJobEntity + AutoSIMD.Enabled` 当前生成标量实体体，直接报 NT031；`Disabled` 和 `Vectorize` 保持各自现有路径 |
 | **NT025** | error | `IJobParallelForBatch` + 非 Cpp 后端或 AutoSIMD（见 §3） |
 | **NT026** | error | 生成器**自身崩溃**（NRE 等）：把异常堆栈落盘到 `%TEMP%/entjoy-native-transpiler-crash.txt` 并报出，避免历史上"`CS8785` + 连坐 `CS0234 Bindings 缺失`"这种看不出原因的失败 |
 | **NT027** | error | `ref` 局部的**元素类型无法解析**（如 `ref var` 且无法推断）：无法生成 `T& x = …`。显式写出元素类型即可；其余 `ref` 局部**已支持**（见 §8.2） |
@@ -333,7 +333,7 @@ Roslyn 的 `CoreCompile` 内容哈希门控会让"只改生成器、不改 C# �
 - 修法：新增 `CppEntityStatementTranslator : CppPointerStatementTranslator`（容器字段 → `_ptr`/`_length`、
   `GetUnsafePtr()` → `_ptr`、指针字段 → `_ptr`），并**关闭 wrap-safe int 算术**
   （IJobChunk 路径本来就带 wrap-safe；IJobEntity 既有产物是裸算术，保持原形态避免无谓回归）。
-  Vectorize / Standard / EntityChunk 三处生成点统一换用。
+  Standard / EntityChunk 两处生成点统一换用。
 - 验收：原生 IJobEntity + `NativeArray` 辅助表 + `Entity` 参数逐实体不一致=0
   （样例 `samples/EntJoySample/13_EnableBitMapNative` 第 [8] 段）。
 

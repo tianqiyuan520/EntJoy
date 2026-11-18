@@ -38,7 +38,7 @@ public struct RelationMaskCppBits : IJobChunk
     }
 }
 
-[NativeTranspile(Target = BackendTarget.Cpp, AutoSIMD = AutoSIMD.Vectorize)]
+[NativeTranspile(Target = BackendTarget.Cpp, AutoSIMD = AutoSIMD.Disabled)]
 public struct RelationMaskCppVectorize : IJobChunk
 {
     public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask mask)
@@ -58,7 +58,7 @@ public struct RelationMaskEntityCpp : IJobEntity
     public void Execute(ref ReadLinkOutput output) { output.Value += 1; }
 }
 
-[NativeTranspile(Target = BackendTarget.Cpp, AutoSIMD = AutoSIMD.Vectorize)]
+[NativeTranspile(Target = BackendTarget.Cpp, AutoSIMD = AutoSIMD.Disabled)]
 public struct RelationMaskEntityIdentityCpp : IJobEntity
 {
     public void Execute(Entity entity, ref ReadLinkOutput output) { output.Value = entity.Id + 1; }

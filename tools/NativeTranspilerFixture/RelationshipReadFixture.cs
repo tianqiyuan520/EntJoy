@@ -31,7 +31,7 @@ public struct ReadLinkCppSimd : IJobChunk
     }
 }
 
-[NativeTranspile(Target = BackendTarget.Cpp, AutoSIMD = AutoSIMD.Vectorize)]
+[NativeTranspile(Target = BackendTarget.Cpp, AutoSIMD = AutoSIMD.Disabled)]
 public struct ReadLinkCppVectorize : IJobEntity
 {
     public void Execute(ReadLink link, ref ReadLinkOutput output)

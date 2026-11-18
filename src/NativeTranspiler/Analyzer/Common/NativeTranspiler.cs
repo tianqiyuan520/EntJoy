@@ -50,15 +50,14 @@ namespace NativeTranspiler.Analyzer
         }
 
         /// <summary>
-        /// 自动 SIMD 向量化开关。
-        /// ⚠ 事实：对 `IJobParallelFor` 的 job，整步比标量基线慢 ~10%，
-        /// 设 `Enabled` 会得到一条 NT024 警告（见 NativeTranspileValidator）。
+        /// 自动 SIMD 向量化开关：`Enabled` 生成手写 SIMD 向量体，`Disabled` 生成标量体。
+        /// ⚠ 事实：对 `IJobParallelFor` / `IJobFor` / `IJob` 的 job，整步比标量基线慢 ~10%，
+        /// 设 `Enabled` 会得到 NT024（见 NativeTranspileValidator）。
         /// </summary>
         public enum AutoSIMD
         {
             Enabled,
-            Disabled,
-            Vectorize
+            Disabled
         }
 
         /// <summary>

@@ -1,4 +1,4 @@
-﻿using EntJoy.ECS;
+using EntJoy.ECS;
 using EntJoy.Collections;
 using EntJoy.Mathematics;
 using EntJoy.JobSystem;
@@ -62,7 +62,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Vectorize)]
+    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Disabled)]
     public struct MoveJobEntity_SIMD : IJobEntity
     {
         public float DeltaTime;
@@ -222,10 +222,10 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    // Heavy IJobChunk: auto-vectorize mode (scalar sinf/cosf → Clang @llvm.sin.v8f32)
+    // Heavy IJobChunk: 标量档（sinf/cosf 直调）
 
-    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Vectorize)]
-    public struct HeavyJobChunk_Vectorize : IJobChunk
+    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Disabled)]
+    public struct HeavyJobChunk_Scalar : IJobChunk
     {
         public float DeltaTime;
 
@@ -263,8 +263,8 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Vectorize)]
-    public struct HeavyJobEntity_Vectorize : IJobEntity
+    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Disabled)]
+    public struct HeavyJobEntity_Scalar : IJobEntity
     {
         public float DeltaTime;
 
@@ -292,7 +292,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Vectorize)]
+    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Disabled)]
     public struct HeavyJobEntity_SIMD : IJobEntity
     {
         public float DeltaTime;

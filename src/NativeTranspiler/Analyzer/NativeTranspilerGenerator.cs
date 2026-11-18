@@ -342,8 +342,6 @@ namespace NativeTranspiler.Analyzer
                     CodeGenIo.DeleteIfExists(Path.Combine(outputDir, $"{ispcBase}_mt_wrapper.cpp"));
 
                     var jobAutoSIMD = AttributeHelper.GetAutoSIMD(job, attrSymbol);
-                    bool preciseVectorize = jobAutoSIMD == NativeTranspiler.AutoSIMD.Vectorize
-                        && !HasFastCppMathLib(job, attrSymbol);
 
                     var impl = CppJobGenerator.GenerateJobImplementation(job, ctx.Compilation);
                     var (adapterCode, evtTypes) = CppJobGenerator.GenerateJobAdapter(job, ctx.Compilation);
@@ -351,7 +349,7 @@ namespace NativeTranspiler.Analyzer
                     var cppFile = plainBase + ".cpp";
                     CodeGenIo.WriteAllTextWithRetry(Path.Combine(outputDir, cppFile), impl + adapterCode);
                     cppFiles.Add(cppFile);
-                    if (jobAutoSIMD == NativeTranspiler.AutoSIMD.Enabled || preciseVectorize)
+                    if (jobAutoSIMD == NativeTranspiler.AutoSIMD.Enabled)
                         autoSimdCppFiles.Add(cppFile);
 
                     // SendEvent: 收集事件类型元数据

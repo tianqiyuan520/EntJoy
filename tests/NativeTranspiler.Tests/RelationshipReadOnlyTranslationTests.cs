@@ -60,8 +60,6 @@ public struct ReadLink : IJobChunk {
         [InlineData("GetComponentReadOnlyDataNativeArray", "Disabled")]
         [InlineData("GetComponentReadOnlyDataSpan", "Enabled")]
         [InlineData("GetComponentReadOnlyDataNativeArray", "Enabled")]
-        [InlineData("GetComponentReadOnlyDataSpan", "Vectorize")]
-        [InlineData("GetComponentReadOnlyDataNativeArray", "Vectorize")]
         public void CppReadOnlyColumns_EmitConstPointers(string accessor, string simd)
         {
             var emitted = EmitChunk(accessor, simd: simd);
@@ -104,7 +102,6 @@ using EntJoy.ECS; using NativeTranspiler;
 
         [Theory]
         [InlineData("Cpp", "Disabled")]
-        [InlineData("Cpp", "Vectorize")]
         [InlineData("Ispc", "Disabled")]
         public void ValueEntityRelationshipParameters_AreLocalCopies(string backend, string simd)
         {

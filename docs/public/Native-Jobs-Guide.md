@@ -79,7 +79,7 @@ new AddJob { Values = values, Delta = 1 }.Schedule(values.Length, 64).Complete()
     UseISPC_MT = false,                  // ISPC task 多线程；仅 Target=Ispc
     MathLib = IspcMathLib.fast,          // system | fast(默认) | @default；仅 Target=Ispc
     CppMathLib = CppMathLib.@default,    // @default(默认) | fast
-    AutoSIMD = AutoSIMD.Disabled,        // Disabled(默认) | Enabled | Vectorize
+    AutoSIMD = AutoSIMD.Disabled,        // Disabled(默认) | Enabled
     MathPrecision = SimdMathPrecision.Fastest)] // Fastest(默认) | High | IEEE
 public struct MyJob : IJobParallelFor { … }
 ```
@@ -92,10 +92,10 @@ public struct MyJob : IJobParallelFor { … }
 | 非 Cpp 后端 + `MathPrecision` | 按 job 精度只写进 C++ TU 的 `#define` | NT020 |
 | 非 Cpp 后端 + `CppMathLib = fast` | C++ 专用 | NT021 |
 | 非 ISPC 后端 + `UseISPC_MT` | ISPC 专用 | NT022 |
-| `AutoSIMD = Vectorize` | 仅 `IJobChunk`/`IJobEntity` 实现 | NT018 |
+
 | `IJobParallelForBatch` | 仅 Cpp 且不带 AutoSIMD | NT025 |
 | `AutoSIMD = Enabled`（`IJobParallelFor`/`IJobFor`/`IJob`） | 实测整步比标量基线**慢 ~10%** ⇒ 默认 **error**；要开必须在项目里显式声明 `<EntJoyAutoSimdMeasured>true</EntJoyAutoSimdMeasured>` | **NT024**（error） |
-| `AutoSIMD = Enabled/Vectorize` 但 body 命中"不可向量化"判据 | `Interlocked.*` / `UnsafeUtility.ArrayElementAsRef` / 用户静态辅助函数被喂 varying 实参 / 裸指针+varying 下标+宽元素 ⇒ 整段退回 **per-lane 标量循环**（产物正确但 0 个 `simd_mask`） | **NT031**（error，2026-09-27 新增） |
+| `AutoSIMD = Enabled` 但 body 命中"不可向量化"判据 | `Interlocked.*` / `UnsafeUtility.ArrayElementAsRef` / 用户静态辅助函数被喂 varying 实参 / 裸指针+varying 下标+宽元素 ⇒ 整段退回 **per-lane 标量循环**（产物正确但 0 个 `simd_mask`） | **NT031**（error，2026-09-27 新增） |
 
 **两个"能编但没用"的坑**：`AutoSIMD = Enabled` 在 `IJobParallelFor`/`IJobFor`/`IJob` 上实测比标量基线慢 ~10% ⇒ **NT024**（error）；body 命中不可向量化判据时整段退回 per-lane 标量 ⇒ **NT031**（error）。`MathPrecision` 三档都生效（Fastest 多项式 / High double lane / IEEE 逐 lane libm），不设诊断。样例项目 `samples/EntJoySample` 因它的 AutoSIMD job 就是被 `tools/AutoSIMDVerify`(26/26)+`tools/AutoSIMDEdgeCases`(143/143) 逐值对照过的被测对象，显式打开了 `EntJoyAutoSimdMeasured`。详见边界文档 §4。
 

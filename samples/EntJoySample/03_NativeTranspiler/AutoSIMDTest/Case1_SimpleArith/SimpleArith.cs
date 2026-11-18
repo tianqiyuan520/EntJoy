@@ -1,4 +1,4 @@
-﻿using EntJoy.ECS;
+using EntJoy.ECS;
 using EntJoy.Collections;
 using EntJoy.JobSystem;
 
@@ -164,7 +164,7 @@ namespace EntJoySample.AutoSIMDTest
         }
     }
 
-    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Vectorize)]
+    [NativeTranspiler.NativeTranspile(AutoSIMD = NativeTranspiler.AutoSIMD.Disabled)]
     public struct SimpleArith_SIMD_Entity : IJobEntity
     {
         public void Execute(ref SimpleArithCompResult result, in SimpleArithCompA a, in SimpleArithCompB b, in SimpleArithCompC c)

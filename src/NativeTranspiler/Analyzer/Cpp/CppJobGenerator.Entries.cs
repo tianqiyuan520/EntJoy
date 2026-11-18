@@ -210,43 +210,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("}");
         }
 
-        private static void GenerateChunkFunctionVectorize(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
-        {
-            // Generate auto-vectorizable scalar loop — Clang generates @llvm.sin.v8f32 / cos.v8f32
-            bool usesSendEvent = JobUsesSendEvent(jobStruct, compilation);
-            var chunkParams = BuildChunkJobParameters(jobStruct, includeHeader: usesSendEvent);
-            var singleFuncName = GetCppJobFunctionName(jobStruct);
-            sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
-            sb.AppendLine("{");
-            AppendLocalVariableDeclarations(jobStruct, sb, compilation: compilation);
-            sb.AppendLine("    EntityMatchMask __queryMask(__chunkData->filter, __chunkData->entityCount);");
-            sb.AppendLine("    if (!__queryMask.HasMatches()) return;");
-            var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
-            var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
-            if (methodSyntax?.Body != null)
-            {
-                var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-                var requiredTypes = CollectChunkNativeArrayTypes(jobStruct, compilation);
-                var sharedTypes = CollectSharedComponentTypes(jobStruct, compilation);
-                // Use same chunk translator as standard mode — produces scalar ptr[index].field
-                var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, sharedTypes, useFastMath);
-                var bodyCode = translator.Translate(methodSyntax.Body);
-                // Insert auto-vectorize pragma before the entity for-loop
-                string pragma = "#ifdef __clang__\n#pragma clang loop vectorize(enable) interleave(enable)\n#endif\n";
-                int forPos = bodyCode.IndexOf("for (");
-                if (forPos >= 0)
-                    bodyCode = bodyCode.Insert(forPos, pragma);
-                sb.Append(CodeIndent.Shift(bodyCode, 1));
-            }
-            else
-            {
-                sb.AppendLine("    // (empty IJobChunk Execute body)");
-            }
-            sb.AppendLine("}");
-        }
 
-        private static void GenerateEntityFunctionVectorize(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
-            => GenerateEntityChunkFunctionStandard(jobStruct, compilation, sb, useFastMath, vectorize: true);
         private static void GenerateEntityFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
         {
             var chunkParams = BuildChunkJobParameters(jobStruct, includeTypeIds: false);
@@ -354,7 +318,7 @@ namespace NativeTranspiler.Analyzer
         /// void Execute(const ChunkData* __chunkData, ... field_ptrs ...)
         /// 使用 ChunkData 轻量结构（不含 __requiredComponentTypeIds），componentArrays 直接索引。
         /// </summary>
-        private static void GenerateEntityChunkFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath, bool vectorize = false)
+        private static void GenerateEntityChunkFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
         {
             var chunkParams = BuildChunkJobParameters(jobStruct, includeTypeIds: false);
             var singleFuncName = GetCppJobFunctionName(jobStruct);
@@ -408,12 +372,6 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
             void AppendLoop(bool filtered)
             {
-                if (vectorize && !filtered)
-                {
-                    sb.AppendLine("#ifdef __clang__");
-                    sb.AppendLine("#pragma clang loop vectorize(enable) interleave(enable)");
-                    sb.AppendLine("#endif");
-                }
                 sb.AppendLine("        for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
                 sb.AppendLine("        {");
                 if (filtered)

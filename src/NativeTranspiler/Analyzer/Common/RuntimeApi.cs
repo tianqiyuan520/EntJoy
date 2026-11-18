@@ -37,8 +37,7 @@ namespace {AttributeNamespace}
     public enum AutoSIMD
     {{
         Enabled,
-        Disabled,
-        Vectorize
+        Disabled
     }}
 
     public enum SimdMathPrecision
