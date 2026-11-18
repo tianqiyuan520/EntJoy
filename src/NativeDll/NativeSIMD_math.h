@@ -45,6 +45,9 @@ static N_FORCEINLINE n_float _n_dom_pow(n_float x, n_float y, n_float r) {
   n_mask yInt = n_cmp_eq_ps(y, n_trunc_ps(y));
   n_mask yOdd = n_and_mask(n_cmp_ne_ps(n_mul_ps(n_trunc_ps(n_mul_ps(y, n_set1_ps(0.5f))), n_set1_ps(2.0f)), y),
                            n_cmp_lt_ps(n_fabs_ps(y), n_set1_ps(8388608.0f)));
+  // 负底数：整数指数按奇偶给符号，非整数为 NaN（内核只算 |x|^y）
+  r = n_mul_ps(r, n_blendv_ps(one, n_set1_ps(-1.0f), n_and_mask(xNeg, n_and_mask(yInt, yOdd))));
+  r = n_blendv_ps(r, n_set1_ps(NAN), n_and_mask(xNeg, n_not_mask(yInt)));
   n_float magInf = n_blendv_ps(zero, inf, yPos);
   n_float magZero = n_blendv_ps(inf, zero, yPos);
   // -inf 底数：整数指数按奇偶给 ±inf / ±0，非整数为 NaN
@@ -388,26 +391,8 @@ static N_FORCEINLINE __m256 _n_pow_avx2_ps(__m256 x, __m256 y) {
   __m128 rhi = _mm256_cvtpd_ps(_n_exp2_pd(vh));
   __m256 mag = _mm256_insertf128_ps(_mm256_castps128_ps256(rlo), rhi, 1);
 
-  __m256 ay = _n256_abs(y);
-  __m256 yIsInt = _n256_eq(y, _n256_trunc(y));
-  // |y| >= 2^23 的 float 一定是偶数整数，奇偶性只需在更小的幅值上判
-  __m256 yOdd = _mm256_and_ps(_n256_ne(_mm256_mul_ps(_n256_trunc(_mm256_mul_ps(y, _mm256_set1_ps(0.5f))), _mm256_set1_ps(2.0f)), y),
-                                _n256_lt(ay, _mm256_set1_ps(8388608.0f)));
-  // 负号用符号位判，-0.0 也要参与（pow(-0, 奇数) = -0）
-  __m256 xSign = _mm256_castsi256_ps(_mm256_srai_epi32(_mm256_castps_si256(x), 31));
-  __m256 sign = _mm256_blendv_ps(_mm256_set1_ps(1.0f), _mm256_set1_ps(-1.0f),
-                                _mm256_and_ps(xSign, _mm256_and_ps(yIsInt, yOdd)));
-  __m256 yInt = yIsInt;
-  __m256 result = _mm256_mul_ps(mag, sign);
-  result = _mm256_blendv_ps(result, _mm256_set1_ps(NAN), _mm256_and_ps(_n256_lt(x, _mm256_set1_ps(0.0f)), _n256_not(yInt)));
-  result = _mm256_blendv_ps(result, _mm256_set1_ps(1.0f), _n256_eq(y, _mm256_set1_ps(0.0f)));
-  __m256 xZero = _n256_eq(x, _mm256_set1_ps(0.0f));
-  result = _mm256_blendv_ps(result, _mm256_mul_ps(sign, _mm256_set1_ps(INFINITY)),
-                             _mm256_and_ps(xZero, _n256_lt(y, _mm256_set1_ps(0.0f))));
-  result = _mm256_blendv_ps(result, _mm256_mul_ps(sign, _mm256_set1_ps(0.0f)),
-                             _mm256_and_ps(xZero, _n256_gt(y, _mm256_set1_ps(0.0f))));
-  return _mm256_blendv_ps(result, _mm256_set1_ps(NAN),
-                     _mm256_or_ps(_n256_ne(x, x), _n256_ne(y, y)));
+  // 只算 |x|^y：符号、奇偶、零底数与 NaN 全部由 _n_dom_pow 负责
+  return mag;
 }
 // ================================================================
 // ================================================================
@@ -1105,21 +1090,8 @@ static N_FORCEINLINE n_float _n_pow_neon(n_float x, n_float y) {
   n_float mag = vcombine_f32(vcvt_f32_f64(_n_exp2_neon(vlo)), vcvt_f32_f64(_n_exp2_neon(vhi)));
 
   // 负底数：仅整数指数成立，奇数指数取负；|y| >= 2^23 的 float 必为偶数整数
-  n_float ay = vabsq_f32(y);
-  uint32x4_t yIsInt = vceqq_f32(y, vrndq_f32(y));
-  uint32x4_t yOdd = vandq_u32(vmvnq_u32(vceqq_f32(vmulq_f32(vrndq_f32(vmulq_f32(y, vdupq_n_f32(0.5f))), vdupq_n_f32(2.0f)), y)),
-                             vcltq_f32(ay, vdupq_n_f32(8388608.0f)));
-  // 负号用符号位判，-0.0 也参与
-  uint32x4_t xSign = vcltq_s32(vreinterpretq_s32_f32(x), vdupq_n_s32(0));
-  n_float signVal = vbslq_f32(xSign, vdupq_n_f32(-1.0f), vdupq_n_f32(1.0f));
-  n_float result = vbslq_f32(vandq_u32(xSign, vandq_u32(yIsInt, yOdd)), vnegq_f32(mag), mag);
-
-  result = vbslq_f32(vandq_u32(xSign, vmvnq_u32(yIsInt)), vdupq_n_f32(NAN), result);
-  result = vbslq_f32(vceqq_f32(y, vdupq_n_f32(0.0f)), vdupq_n_f32(1.0f), result);
-  uint32x4_t xZero = vceqq_f32(x, vdupq_n_f32(0.0f));
-  result = vbslq_f32(vandq_u32(xZero, vcltq_f32(y, vdupq_n_f32(0.0f))), vmulq_f32(signVal, vdupq_n_f32(INFINITY)), result);
-  result = vbslq_f32(vandq_u32(xZero, vcgtq_f32(y, vdupq_n_f32(0.0f))), vmulq_f32(signVal, vdupq_n_f32(0.0f)), result);
-  return vbslq_f32(vorrq_u32(vmvnq_u32(vceqq_f32(x, x)), vmvnq_u32(vceqq_f32(y, y))), vdupq_n_f32(NAN), result);
+  // 只算 |x|^y：符号、奇偶、零底数与 NaN 全部由 _n_dom_pow 负责
+  return mag;
 }
 #endif // NSIMD_NEON && __aarch64__
 
@@ -1953,7 +1925,8 @@ static N_FORCEINLINE n_float _n_log10_fallback(n_float a) {
 static N_FORCEINLINE n_float _n_pow_fallback(n_float a, n_float b) {
   float la[NSIMD_WIDTH], lb[NSIMD_WIDTH];
   n_store_ps(la, a); n_store_ps(lb, b);
-  for (int i = 0; i < NSIMD_WIDTH; i++) la[i] = ::powf(la[i], lb[i]);
+  // 只算 |x|^y：符号由 _n_dom_pow 统一负责（其余内核同样只返回幅值）
+  for (int i = 0; i < NSIMD_WIDTH; i++) la[i] = ::powf(std::fabs(la[i]), lb[i]);
   return n_load_ps(la);
 }
 #define N_POW(a,b) [&](n_float _va, n_float _vb) { return _n_dom_pow((_va), (_vb), _n_pow_fallback(_va, _vb)); }((a), (b))
