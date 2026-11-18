@@ -96,6 +96,13 @@ int main()
     const float xa[] = { 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, INFINITY };
     Binary("atan2", [](n_float a, n_float b) { return N_ATAN2(a, b); }, RefAtan2, ya, xa, 7);
 
+    // exp 的 2^128 尾段：内核把指数拆成两段因子，这一段是溢出边界
+    const float expBand[] = { 88.0f, 88.3f, 88.5f, 88.72f, 88.73f };
+    Unary("exp", [](n_float v) { return N_EXP(v); }, RefExp, expBand, 5);
+    const float hypBand[] = { 88.0f, 88.3f, 88.5f };
+    Unary("sinh", [](n_float v) { return N_SINH(v); }, RefSinh, hypBand, 3);
+    Unary("cosh", [](n_float v) { return N_COSH(v); }, RefCosh, hypBand, 3);
+
     // N_SINCOS 一次算两路，必须与单独调用一致
     {
         alignas(64) float in[NSIMD_WIDTH], sOut[NSIMD_WIDTH], cOut[NSIMD_WIDTH];

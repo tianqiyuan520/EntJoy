@@ -254,9 +254,10 @@ static N_FORCEINLINE __m256 _n_exp_avx2(__m256 d) {
   p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0f));
   p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0f));
 
-  __m256i ni = _mm256_cvtps_epi32(_mm256_max_ps(_mm256_min_ps(n, _mm256_set1_ps(127.0f)),
-                                               _mm256_set1_ps(-252.0f)));
-  __m256i n1 = _mm256_max_epi32(ni, _mm256_set1_epi32(-126));
+  // 2^n 拆成两段等量因子：|n| <= 252 时每段都在 float 指数域内，且先乘 p 再乘 s2 不会提前溢出
+  __m256i ni = _mm256_cvtps_epi32(_mm256_max_ps(_mm256_min_ps(n, _mm256_set1_ps(252.0f)),
+                                                 _mm256_set1_ps(-252.0f)));
+  __m256i n1 = _mm256_srai_epi32(ni, 1);
   __m256i n2 = _mm256_sub_epi32(ni, n1);
   __m256 s1 = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_add_epi32(n1, _mm256_set1_epi32(127)), 23));
   __m256 s2 = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_add_epi32(n2, _mm256_set1_epi32(127)), 23));
@@ -874,11 +875,12 @@ static N_FORCEINLINE n_float _n_exp_neon(n_float d) {
   p = vfmaq_f32(vdupq_n_f32(0.5f), p, r);
   p = vfmaq_f32(vdupq_n_f32(1.0f), p, r);
   p = vfmaq_f32(vdupq_n_f32(1.0f), p, r);
-  // 次正规结果需要两段缩放：先夹到 -126，剩余指数单独乘
-  n_int hi = vmaxq_s32(vminq_s32(ni, vdupq_n_s32(127)), vdupq_n_s32(-126));
-  n_int lo = vsubq_s32(ni, hi);
+  // 2^n 拆成两段等量因子：|n| <= 252 时每段都在 float 指数域内
+  n_int nc = vmaxq_s32(vminq_s32(ni, vdupq_n_s32(252)), vdupq_n_s32(-252));
+  n_int hi = vshrq_n_s32(nc, 1);
+  n_int lo = vsubq_s32(nc, hi);
   n_float s1 = vreinterpretq_f32_s32(vshlq_n_s32(vaddq_s32(hi, vdupq_n_s32(127)), 23));
-  n_float s2 = vreinterpretq_f32_s32(vshlq_n_s32(vaddq_s32(vmaxq_s32(lo, vdupq_n_s32(-126)), vdupq_n_s32(127)), 23));
+  n_float s2 = vreinterpretq_f32_s32(vshlq_n_s32(vaddq_s32(lo, vdupq_n_s32(127)), 23));
   n_float result = vmulq_f32(vmulq_f32(p, s1), s2);
   result = vbslq_f32(vcgtq_f32(d, vdupq_n_f32(88.722839f)), vdupq_n_f32(INFINITY), result);
   return vbslq_f32(vcltq_f32(d, vdupq_n_f32(-103.972084f)), vdupq_n_f32(0.0f), result);
@@ -1462,7 +1464,6 @@ static N_FORCEINLINE __m128 _n_exp_sse41(__m128 d) {
   p = _n_madd_ps(_mm_set1_ps(0.5f), p, r);
   p = _n_madd_ps(_mm_set1_ps(1.0f), p, r);
   p = _n_madd_ps(_mm_set1_ps(1.0f), p, r);
-  // 次正规结果需要两段缩放：先夹到 -126，剩余指数单独乘
   __m128 nc = _mm_max_ps(_mm_min_ps(n, _mm_set1_ps(127.0f)), _mm_set1_ps(-126.0f));
   __m128i hi = _mm_cvtps_epi32(nc);
   __m128i lo = _mm_sub_epi32(ni, hi);
