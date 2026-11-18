@@ -440,12 +440,13 @@ static N_FORCEINLINE __m256d _n_atan2_4_pd(__m256d y, __m256d x) {
 }
 
 static N_FORCEINLINE __m256d _n_exp4_pd(__m256d x) {
-  // 定义域：+inf -> +inf，-inf -> 0，NaN 透传（exp2 的指数位构造对特殊值无定义）
+  // 定义域：+inf -> +inf，-inf -> 0，NaN 透传
+  // 濠㈣泛绉堕弫?pow 閻犱警鍨扮欢鐐烘煂瀹€鈧▓?exp2闁挎稒鐡眡p(x) = 2^(x/ln2)
   __m256d res = _n_exp2_pd(_mm256_mul_pd(x, _mm256_set1_pd(1.4426950408889634)));
+  // 定义域：+inf -> +inf，-inf -> 0，NaN 透传（指数位构造对特殊值无定义）
   res = _mm256_blendv_pd(res, _mm256_set1_pd(INFINITY), _mm256_cmp_pd(x, _mm256_set1_pd(709.78), _CMP_GT_OQ));
   res = _mm256_blendv_pd(res, _mm256_setzero_pd(), _mm256_cmp_pd(x, _mm256_set1_pd(-745.2), _CMP_LT_OQ));
   return _mm256_blendv_pd(res, x, _mm256_cmp_pd(x, x, _CMP_UNORD_Q));
-  return _n_exp2_pd(_mm256_mul_pd(x, _mm256_set1_pd(1.4426950408889634)));
 }
 
 static N_FORCEINLINE __m256d _n_tan4_pd(__m256d x) {
@@ -927,11 +928,16 @@ static N_FORCEINLINE n_float _n_atan2_neon(n_float y, n_float x) {
   n_float r = _n_atan_neon(vdivq_f32(y, x));
   n_float adj = vbslq_f32(vcgeq_f32(y, zero), pi, vnegq_f32(pi));
   r = vbslq_f32(vcltq_f32(x, zero), vaddq_f32(r, adj), r);
-  // y = ±0 且 x > 0 时结果为 ±0（保留零的符号，asin(-0) 才能得到 -0）
+  // y = ±0 且 x > 0 时结果为 ±0
   n_mask yZeroPos = vandq_u32(vceqq_f32(y, zero), vcgtq_f32(x, zero));
   r = vbslq_f32(yZeroPos, vreinterpretq_f32_u32(vandq_u32(vreinterpretq_u32_f32(y), vdupq_n_u32(0x80000000u))), r);
-  n_mask bothZero = vandq_u32(vceqq_f32(x, zero), vceqq_f32(y, zero));
-  return vbslq_f32(bothZero, zero, r);
+  return vbslq_f32(vandq_u32(vceqq_f32(x, zero), vceqq_f32(y, zero)), zero, r);
+}
+
+static N_FORCEINLINE n_float _n_asin_neon(n_float a) {
+  n_float one = vdupq_n_f32(1.0f);
+  n_float t = vsqrtq_f32(vmaxq_f32(vmulq_f32(vsubq_f32(one, a), vaddq_f32(one, a)), vdupq_n_f32(0.0f)));
+  return vmulq_f32(vdupq_n_f32(2.0f), _n_atan2_neon(a, vaddq_f32(one, t)));
 }
 
 static N_FORCEINLINE n_float _n_acos_neon(n_float a) {
@@ -1517,9 +1523,6 @@ static N_FORCEINLINE __m128 _n_atan2_sse41(__m128 y, __m128 x) {
   __m128 r = _n_atan_sse41(_mm_div_ps(y, x));
   __m128 adj = _n_blend_sse41(_mm_sub_ps(zero, pi), pi, _mm_cmpge_ps(y, zero));
   r = _n_blend_sse41(r, _mm_add_ps(r, adj), _mm_cmplt_ps(x, zero));
-  // y = ±0 且 x > 0 时结果为 ±0（保留零的符号，asin(-0) 才能得到 -0）
-  __m128 yZeroPos = _mm_and_ps(_mm_cmpeq_ps(y, zero), _mm_cmpgt_ps(x, zero));
-  r = _n_blend_sse41(r, _mm_and_ps(y, _mm_set1_ps(-0.0f)), yZeroPos);
   __m128 bothZero = _mm_and_ps(_mm_cmpeq_ps(x, zero), _mm_cmpeq_ps(y, zero));
   return _n_blend_sse41(r, zero, bothZero);
 }
@@ -1978,8 +1981,7 @@ static N_FORCEINLINE n_float _n_atan2_ps(n_float y, n_float x) {
   // y = ±0 且 x > 0 时结果为 ±0（保留零的符号，asin(-0) 才能得到 -0）
   n_float yZeroPos = n_and_mask(n_cmp_eq_ps(y, zero), n_cmp_gt_ps(x, zero));
   r = n_blendv_ps(r, _mm256_and_ps(y, n_set1_ps(-0.0f)), yZeroPos);
-  n_float bothZero = n_and_mask(n_cmp_eq_ps(x, zero), n_cmp_eq_ps(y, zero));
-  return n_blendv_ps(r, zero, bothZero);
+  return n_blendv_ps(r, zero, n_and_mask(n_cmp_eq_ps(x, zero), n_cmp_eq_ps(y, zero)));
 }
 static N_FORCEINLINE n_float _n_asin_ps(n_float a) {
   // asin(x) = 2*atan2(x, 1 + sqrt(1 - x^2))闁? - x^2 闁?(1-x)(1+x) 閻犱緤绱曢悾濠氭晬鐎靛彻| -> 1 濠㈣泛瀚粭澶嬬▔閵忋垻缈遍幖?
