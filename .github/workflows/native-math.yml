@@ -51,16 +51,14 @@ jobs:
       # 编译门禁严格；数值执行 best effort —— GitHub 托管 runner 上 SDE 会让被测进程
       # SIGSEGV（PIN 与内核交互），同一份产物在本地 Windows SDE 10.13.1 上跑通，
       # 数值与 AVX2 逐项一致。
-      - name: ULP gate (Fastest, AVX512, best effort)
+      - name: ULP run (Fastest, AVX512, best effort, not a gate)
         continue-on-error: true
         run: |
-          set +e
           sde="./${SDE_DIR}sde64"
           "$sde" -skx -- "$PWD/build-avx512/MathUlpCheck"
-      - name: ULP gate (High, AVX512, best effort)
+      - name: ULP run (High, AVX512, best effort, not a gate)
         continue-on-error: true
         run: |
-          set +e
           sde="./${SDE_DIR}sde64"
           "$sde" -skx -- "$PWD/build-avx512/MathUlpCheckHigh"
 
