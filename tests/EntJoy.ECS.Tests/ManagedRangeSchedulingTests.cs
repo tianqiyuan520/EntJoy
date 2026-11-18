@@ -75,7 +75,7 @@ namespace EntJoy.ECS.Tests
             public void Execute() { }
         }
 
-        // 涓婃父 job 鐨勫紓甯哥暀鍦ㄥ畠鑷繁鐨勫彞鏌勪笂锛氫笅娓镐笉缁ф壙銆佷笂娓镐笉琚悶锛堜笌 native 鍚庣鍚屼竴璇箟锛夈€?
+        // 上游 job 的异常留在它自己的句柄上：下游不继承、上游不被吞（与 native 后端同一语义）
         [Fact]
         public void DependencyException_StaysOnThrowingJob()
         {

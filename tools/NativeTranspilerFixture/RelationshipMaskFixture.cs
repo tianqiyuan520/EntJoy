@@ -39,7 +39,7 @@ public struct RelationMaskCppBits : IJobChunk
 }
 
 [NativeTranspile(Target = BackendTarget.Cpp, AutoSIMD = AutoSIMD.Disabled)]
-public struct RelationMaskCppVectorize : IJobChunk
+public struct RelationMaskCppScalar : IJobChunk
 {
     public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask mask)
     {
@@ -158,7 +158,7 @@ public static unsafe class RelationshipMaskFixture
         {
             ((path, world, query) => ExecuteChunk<RelationMaskCpp>(path, world, query, true), 5, true, false),
             ((path, world, query) => ExecuteChunk<RelationMaskCppBits>(path, world, query, false), 5, false, false),
-            ((path, world, query) => ExecuteChunk<RelationMaskCppVectorize>(path, world, query, false), 5, false, false),
+            ((path, world, query) => ExecuteChunk<RelationMaskCppScalar>(path, world, query, false), 5, false, false),
             ((path, world, query) => ExecuteChunk<RelationMaskRangesCpp>(path, world, query, false), 5, false, false),
             ((path, world, query) => Execute<RelationMaskEntityCpp>(path, world, query, false, entity: true), 3, false, false),
             ((path, world, query) => Execute<RelationMaskEntityIdentityCpp>(path, world, query, false, entity: true), 3, false, true),
