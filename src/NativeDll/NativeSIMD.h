@@ -754,7 +754,8 @@ static inline n_float n_blendv_ps(n_float a, n_float b, n_mask mask) {
 #elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_blendv_ps(a, b, mask);
 #elif defined(NSIMD_SSE4)
-    return _mm_blendv_ps(a, b, mask);
+    // MSVC 的 /arch:SSE2 里没有 _mm_blendv_ps，用位运算（SSE2 足够）
+    return _mm_or_ps(_mm_and_ps(mask, b), _mm_andnot_ps(mask, a));
 #elif defined(NSIMD_NEON)
     return vbslq_f32(mask, b, a);
 #else
@@ -1684,6 +1685,60 @@ static inline n_mask n_cmp_lt_pd(n_double a, n_double b) {
 #endif
 }
 
+static inline n_mask n_cmp_gt_pd(n_double a, n_double b) {
+#if defined(NSIMD_AVX512)
+    return _mm512_cmp_pd_mask(a, b, _CMP_GT_OS);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_castpd_ps(_mm256_cmp_pd(a, b, _CMP_GT_OS));
+#elif defined(NSIMD_SSE4)
+    return _mm_castpd_ps(_mm_cmpgt_pd(a, b));
+#elif defined(NSIMD_NEON)
+    return vreinterpretq_u32_u64(vcgtq_f64(a, b));
+#else
+    return a > b;
+#endif
+}
+
+static inline n_mask n_cmp_ne_pd(n_double a, n_double b) {
+#if defined(NSIMD_AVX512)
+    return _mm512_cmp_pd_mask(a, b, _CMP_NEQ_UQ);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_castpd_ps(_mm256_cmp_pd(a, b, _CMP_NEQ_UQ));
+#elif defined(NSIMD_SSE4)
+    return _mm_castpd_ps(_mm_cmpneq_pd(a, b));
+#elif defined(NSIMD_NEON)
+    return vreinterpretq_u32_u64(vmvnq_u64(vceqq_f64(a, b)));
+#else
+    return a != b;
+#endif
+}
+static inline n_double n_fabs_pd(n_double a) {
+#if defined(NSIMD_AVX512)
+    return _mm512_abs_pd(a);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_andnot_pd(_mm256_set1_pd(-0.0), a);
+#elif defined(NSIMD_SSE4)
+    return _mm_andnot_pd(_mm_set1_pd(-0.0), a);
+#elif defined(NSIMD_NEON)
+    return vabsq_f64(a);
+#else
+    return a < 0 ? -a : a;
+#endif
+}
+
+static inline n_double n_neg_pd(n_double a) {
+#if defined(NSIMD_AVX512)
+    return _mm512_sub_pd(_mm512_setzero_pd(), a);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_sub_pd(_mm256_setzero_pd(), a);
+#elif defined(NSIMD_SSE4)
+    return _mm_sub_pd(_mm_setzero_pd(), a);
+#elif defined(NSIMD_NEON)
+    return vnegq_f64(a);
+#else
+    return -a;
+#endif
+}
 static inline n_mask n_cmp_eq_pd(n_double a, n_double b) {
 #if defined(NSIMD_AVX512)
     return _mm512_cmp_pd_mask(a, b, _CMP_EQ_OS);
@@ -1705,7 +1760,9 @@ static inline n_double n_blend_pd(n_double f, n_double t, n_mask m) {
 #elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
     return _mm256_blendv_pd(f, t, _mm256_castps_pd(m));
 #elif defined(NSIMD_SSE4)
-    return _mm_blendv_pd(f, t, _mm_castps_pd(m));
+    // MSVC 的 /arch:SSE2 里没有 _mm_blendv_pd
+    __m128d mk = _mm_castps_pd(m);
+    return _mm_or_pd(_mm_and_pd(mk, t), _mm_andnot_pd(mk, f));
 #elif defined(NSIMD_NEON)
         return vbslq_f64(vreinterpretq_u64_u32(m), t, f);
 #else

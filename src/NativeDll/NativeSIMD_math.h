@@ -15,6 +15,58 @@
     #define N_FORCEINLINE inline
 #endif
 
+
+// ================================================================
+// 定义域策略（通解）：所有内核返回前统一调用，避免每个 ISA / 精度档各写一份 blend。
+//   exp  : +inf -> +inf，-inf -> 0，NaN 透传
+//   log  : 0 -> -inf，负数 -> NaN，+inf -> +inf，NaN 透传
+//   tanh : |x| 超过饱和点 -> 带符号的 1，NaN 透传
+//   atan2: y = ±0 且 x > 0 时结果为带符号的零
+// ================================================================
+static N_FORCEINLINE n_float _n_dom_exp(n_float x, n_float r) {
+  r = n_blendv_ps(r, n_set1_ps(INFINITY), n_cmp_eq_ps(x, n_set1_ps(INFINITY)));
+  r = n_blendv_ps(r, n_set1_ps(0.0f), n_cmp_eq_ps(x, n_set1_ps(-INFINITY)));
+  return n_blendv_ps(r, x, n_cmp_ne_ps(x, x));
+}
+
+static N_FORCEINLINE n_float _n_dom_log(n_float x, n_float r) {
+  r = n_blendv_ps(r, n_set1_ps(-INFINITY), n_cmp_eq_ps(x, n_set1_ps(0.0f)));
+  r = n_blendv_ps(r, n_set1_ps(NAN), n_cmp_lt_ps(x, n_set1_ps(0.0f)));
+  r = n_blendv_ps(r, n_set1_ps(INFINITY), n_cmp_eq_ps(x, n_set1_ps(INFINITY)));
+  return n_blendv_ps(r, x, n_cmp_ne_ps(x, x));
+}
+
+static N_FORCEINLINE n_float _n_dom_tanh(n_float x, n_float r) {
+  n_float one = n_blendv_ps(n_set1_ps(1.0f), n_set1_ps(-1.0f), n_cmp_lt_ps(x, n_set1_ps(0.0f)));
+  r = n_blendv_ps(r, one, n_cmp_gt_ps(n_fabs_ps(x), n_set1_ps(20.0f)));
+  return n_blendv_ps(r, x, n_cmp_ne_ps(x, x));
+}
+
+static N_FORCEINLINE n_float _n_dom_atan2(n_float y, n_float x, n_float r) {
+  n_float sz = n_mul_ps(y, n_set1_ps(0.0f));   // y 的带符号零
+  n_mask cond = n_and_mask(n_cmp_eq_ps(y, n_set1_ps(0.0f)), n_cmp_gt_ps(x, n_set1_ps(0.0f)));
+  return n_blendv_ps(r, sz, cond);
+}
+
+static N_FORCEINLINE n_double _n_dom_exp_pd(n_double x, n_double r) {
+  r = n_blend_pd(r, n_set1_pd(INFINITY), n_cmp_eq_pd(x, n_set1_pd(INFINITY)));
+  r = n_blend_pd(r, n_set1_pd(0.0), n_cmp_eq_pd(x, n_set1_pd(-INFINITY)));
+  return n_blend_pd(r, x, n_cmp_ne_pd(x, x));
+}
+
+static N_FORCEINLINE n_double _n_dom_log_pd(n_double x, n_double r) {
+  r = n_blend_pd(r, n_set1_pd(-INFINITY), n_cmp_eq_pd(x, n_set1_pd(0.0)));
+  r = n_blend_pd(r, n_set1_pd(NAN), n_cmp_gt_pd(n_set1_pd(0.0), x));
+  r = n_blend_pd(r, n_set1_pd(INFINITY), n_cmp_eq_pd(x, n_set1_pd(INFINITY)));
+  return n_blend_pd(r, x, n_cmp_ne_pd(x, x));
+}
+
+static N_FORCEINLINE n_double _n_dom_atan2_pd(n_double y, n_double x, n_double r) {
+  n_double sz = n_mul_pd(y, n_set1_pd(0.0));
+  n_mask cond = n_and_mask(n_cmp_eq_pd(y, n_set1_pd(0.0)), n_cmp_gt_pd(x, n_set1_pd(0.0)));
+  return n_blend_pd(r, sz, cond);
+}
+
 // ================================================================
 // Inline AVX2 polynomial implementations (SLEEF coefficients, zero call overhead)
 // Other platforms fall through to per-lane scalar fallbacks below.
@@ -1599,46 +1651,46 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
   #if defined(NSIMD_AVX512)
     #define N_SIN(a)     _n_sin_avx512(a)
     #define N_COS(a)     _n_cos_avx512(a)
-    #define N_LOG(a)     _n_log_avx512(a)
-    #define N_EXP(a)     _n_exp_avx512(a)
+    #define N_LOG(a) _n_dom_log((a), _n_log_avx512(a))
+    #define N_EXP(a) _n_dom_exp((a), _n_exp_avx512(a))
     #define N_LOG10(a)   _mm512_mul_ps(N_LOG(a), _mm512_set1_ps(0.4342944819032518f))
     #define N_POW(a,b)   _n_pow_avx512(a, b)
   #define N_TAN(a)       _n_tan_avx512(a)
   #define N_ASIN(a)      _n_asin_avx512(a)
   #define N_ACOS(a)      _n_acos_avx512(a)
   #define N_ATAN(a)      _n_atan_avx512(a)
-  #define N_ATAN2(a,b)   _n_atan2_avx512(a, b)
+  #define N_ATAN2(a,b) _n_dom_atan2((a), (b), _n_atan2_avx512(a, b))
   #define N_SINH(a)      _n_sinh_avx512(a)
   #define N_COSH(a)      _n_cosh_avx512(a)
-  #define N_TANH(a)      _n_tanh_avx512(a)
+  #define N_TANH(a) _n_dom_tanh((a), _n_tanh_avx512(a))
   #define N_SINCOS(a,s,c) _n_sincos_avx512(a, s, c)
   #elif defined(NSIMD_AVX2)
     #define N_SIN(a)     _n_sin_avx2(a)
     #define N_COS(a)     _n_cos_avx2(a)
-    #define N_LOG(a)     _n_log_avx2(a)
-    #define N_EXP(a)     _n_exp_avx2(a)
+    #define N_LOG(a) _n_dom_log((a), _n_log_avx2(a))
+    #define N_EXP(a) _n_dom_exp((a), _n_exp_avx2(a))
     #define N_LOG10(a)   _mm256_mul_ps(N_LOG(a), _mm256_set1_ps(0.4342944819032518f))
   #elif defined(NSIMD_SSE4)
   #define N_SIN(a)     _n_sin_sse41(a)
   #define N_COS(a)     _n_cos_sse41(a)
-  #define N_LOG(a)     _n_log_sse41(a)
-  #define N_EXP(a)     _n_exp_sse41(a)
+  #define N_LOG(a) _n_dom_log((a), _n_log_sse41(a))
+  #define N_EXP(a) _n_dom_exp((a), _n_exp_sse41(a))
   #define N_LOG10(a)   _mm_mul_ps(N_LOG(a), _mm_set1_ps(0.4342944819032518f))
   // pow 在 SSE4 上走 libm 回退：无 FMA 时 log2/exp2 精度不足，守不住 ULP 门禁
   #define N_TAN(a)       _n_tan_sse41(a)
   #define N_ASIN(a)      _n_asin_sse41(a)
   #define N_ACOS(a)      _n_acos_sse41(a)
   #define N_ATAN(a)      _n_atan_sse41(a)
-  #define N_ATAN2(a,b)   _n_atan2_sse41(a, b)
+  #define N_ATAN2(a,b) _n_dom_atan2((a), (b), _n_atan2_sse41(a, b))
   #define N_SINH(a)      _n_sinh_sse41(a)
   #define N_COSH(a)      _n_cosh_sse41(a)
-  #define N_TANH(a)      _n_tanh_sse41(a)
+  #define N_TANH(a) _n_dom_tanh((a), _n_tanh_sse41(a))
   #define N_SINCOS(a,s,c) _n_sincos_sse41(a, s, c)
 #elif defined(NSIMD_NEON) && defined(__aarch64__)
 #define N_SIN(a)     _n_sin_neon(a)
 #define N_COS(a)     _n_cos_neon(a)
-#define N_LOG(a)     _n_log_neon(a)
-#define N_EXP(a)     _n_exp_neon(a)
+#define N_LOG(a) _n_dom_log((a), _n_log_neon(a))
+#define N_EXP(a) _n_dom_exp((a), _n_exp_neon(a))
 #define N_LOG10(a)   vmulq_f32(N_LOG(a), vdupq_n_f32(0.4342944819032518f))
   #endif
   // 缂備礁瀚幃搴ㄥ礄閼恒儲娈跺璺虹Ф閺併倖绋夋繝鍥ㄦ〃闁汇劌瀚悢鈧痪顓涘亾閻庡湱鍋熼獮鍥晬閸繄鏆板☉鏂款槸濠€顏呯▔鐎ｎ偅鐓欓柨娑樿嫰閻ｎ垶宕烽妸銈呪枏闁活潿鍔岄ˇ鈺冧沪閺囩偟纾婚柨娑樼焸閵嗗孩鎯旇箛鏃€锟ョ憸鏉垮船閹肩兘鏁嶆径娑氱獥
@@ -1648,10 +1700,10 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
     #define N_ASIN(a)      _n_asin_ps(a)
     #define N_ACOS(a)      _n_acos_ps(a)
     #define N_ATAN(a)      _n_atan_ps(a)
-    #define N_ATAN2(a,b)   _n_atan2_ps(a, b)
+    #define N_ATAN2(a,b) _n_dom_atan2((a), (b), _n_atan2_ps(a, b))
     #define N_SINH(a)      _n_sinh_ps(a)
     #define N_COSH(a)      _n_cosh_ps(a)
-    #define N_TANH(a)      _n_tanh_ps(a)
+    #define N_TANH(a) _n_dom_tanh((a), _n_tanh_ps(a))
     #define N_POW(a,b)     _n_pow_avx2_ps(a, b)
     #define N_SINCOS(a,s,c) _n_sincos_ps(a, s, c)
 #elif defined(NSIMD_NEON) && defined(__aarch64__)
@@ -1659,10 +1711,10 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
     #define N_ASIN(a)      _n_asin_neon(a)
     #define N_ACOS(a)      _n_acos_neon(a)
     #define N_ATAN(a)      _n_atan_neon(a)
-    #define N_ATAN2(a,b)   _n_atan2_neon(a, b)
+    #define N_ATAN2(a,b) _n_dom_atan2((a), (b), _n_atan2_neon(a, b))
     #define N_SINH(a)      _n_sinh_neon(a)
     #define N_COSH(a)      _n_cosh_neon(a)
-    #define N_TANH(a)      _n_tanh_neon(a)
+    #define N_TANH(a) _n_dom_tanh((a), _n_tanh_neon(a))
     #define N_POW(a,b)     _n_pow_neon(a, b)
     #define N_SINCOS(a,s,c) do { (s) = _n_sin_neon(a); (c) = _n_cos_neon(a); } while (0)
 #endif
@@ -1683,12 +1735,12 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
     #define N_ASIN(a)      _n_high_asin_avx512(a)
     #define N_ACOS(a)      _n_high_acos_avx512(a)
     #define N_ATAN(a)      _n_high_atan_avx512(a)
-    #define N_ATAN2(a,b)   _n_high_atan2_avx512(a, b)
+    #define N_ATAN2(a,b) _n_dom_atan2((a), (b), _n_high_atan2_avx512(a, b))
     #define N_SINH(a)      _n_high_sinh_avx512(a)
     #define N_COSH(a)      _n_high_cosh_avx512(a)
-    #define N_TANH(a)      _n_high_tanh_avx512(a)
-    #define N_EXP(a)       _n_high_exp_avx512(a)
-    #define N_LOG(a)       _n_high_log_avx512(a)
+    #define N_TANH(a) _n_dom_tanh((a), _n_high_tanh_avx512(a))
+    #define N_EXP(a) _n_dom_exp((a), _n_high_exp_avx512(a))
+    #define N_LOG(a) _n_dom_log((a), _n_high_log_avx512(a))
     #define N_LOG10(a)     _n_high_log10_avx512(a)
     #define N_POW(a,b)     _n_pow_avx512(a, b)
     #define N_SINCOS(a,s,c) _n_high_sincos_avx512(a, s, c)
@@ -1701,12 +1753,12 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
     #define N_ASIN(a)      _n_asin_sse41(a)
     #define N_ACOS(a)      _n_acos_sse41(a)
     #define N_ATAN(a)      _n_atan_sse41(a)
-    #define N_ATAN2(a,b)   _n_atan2_sse41(a, b)
+    #define N_ATAN2(a,b) _n_dom_atan2((a), (b), _n_atan2_sse41(a, b))
     #define N_SINH(a)      _n_sinh_sse41(a)
     #define N_COSH(a)      _n_cosh_sse41(a)
-    #define N_TANH(a)      _n_tanh_sse41(a)
-    #define N_EXP(a)       _n_exp_sse41(a)
-    #define N_LOG(a)       _n_log_sse41(a)
+    #define N_TANH(a) _n_dom_tanh((a), _n_tanh_sse41(a))
+    #define N_EXP(a) _n_dom_exp((a), _n_exp_sse41(a))
+    #define N_LOG(a) _n_dom_log((a), _n_log_sse41(a))
     #define N_LOG10(a)     _n_log10_sse41(a)
   // pow 在 SSE4 上走 libm 回退（无 FMA 时 log2/exp2 精度不足）
     #define N_SINCOS(a,s,c) _n_sincos_sse41(a, s, c)
@@ -1717,12 +1769,12 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
     #define N_ASIN(a)      _n_high_asin_neon(a)
     #define N_ACOS(a)      _n_high_acos_neon(a)
     #define N_ATAN(a)      _n_high_atan_neon(a)
-    #define N_ATAN2(a,b)   _n_high_atan2_neon(a, b)
+    #define N_ATAN2(a,b) _n_dom_atan2((a), (b), _n_high_atan2_neon(a, b))
     #define N_SINH(a)      _n_high_sinh_neon(a)
     #define N_COSH(a)      _n_high_cosh_neon(a)
-    #define N_TANH(a)      _n_high_tanh_neon(a)
-    #define N_EXP(a)       _n_high_exp_neon(a)
-    #define N_LOG(a)       _n_high_log_neon(a)
+    #define N_TANH(a) _n_dom_tanh((a), _n_high_tanh_neon(a))
+    #define N_EXP(a) _n_dom_exp((a), _n_high_exp_neon(a))
+    #define N_LOG(a) _n_dom_log((a), _n_high_log_neon(a))
     #define N_LOG10(a)     _n_high_log10_neon(a)
     // pow 在 NEON High 上走 libm 回退：double lane 版尚未处理负底数/零底数定义域
     #define N_SINCOS(a,s,c) _n_high_sincos_neon(a, s, c)
@@ -1733,12 +1785,12 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
     #define N_ASIN(a)      _n_high_asin(a)
     #define N_ACOS(a)      _n_high_acos(a)
     #define N_ATAN(a)      _n_high_atan(a)
-    #define N_ATAN2(a,b)   _n_high_atan2(a, b)
+    #define N_ATAN2(a,b) _n_dom_atan2((a), (b), _n_high_atan2(a, b))
     #define N_SINH(a)      _n_high_sinh(a)
     #define N_COSH(a)      _n_high_cosh(a)
-    #define N_TANH(a)      _n_high_tanh(a)
-    #define N_EXP(a)       _n_high_exp(a)
-    #define N_LOG(a)       _n_high_log(a)
+    #define N_TANH(a) _n_dom_tanh((a), _n_high_tanh(a))
+    #define N_EXP(a) _n_dom_exp((a), _n_high_exp(a))
+    #define N_LOG(a) _n_dom_log((a), _n_high_log(a))
     #define N_LOG10(a)     _n_high_log10(a)
 #if !defined(NSIMD_AVX512)
 #define N_POW(a,b)     _n_pow_avx2_ps(a, b)
@@ -1836,7 +1888,7 @@ static N_FORCEINLINE n_float _n_atan2_fallback(n_float a, n_float b) {
   for (int i = 0; i < NSIMD_WIDTH; i++) la[i] = ::atan2f(la[i], lb[i]);
   return n_load_ps(la);
 }
-#define N_ATAN2(a,b) _n_atan2_fallback(a,b)
+#define N_ATAN2(a,b) _n_dom_atan2((a), (b), _n_atan2_fallback(a,b))
 #endif
 
 #ifndef N_SINH
@@ -1863,7 +1915,7 @@ static N_FORCEINLINE n_float _n_tanh_fallback(n_float a) {
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::tanhf(lane[i]);
   return n_load_ps(lane);
 }
-#define N_TANH(a) _n_tanh_fallback(a)
+#define N_TANH(a) _n_dom_tanh((a), _n_tanh_fallback(a))
 #endif
 
 #ifndef N_EXP
@@ -1872,7 +1924,7 @@ static N_FORCEINLINE n_float _n_exp_fallback(n_float a) {
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::expf(lane[i]);
   return n_load_ps(lane);
 }
-#define N_EXP(a) _n_exp_fallback(a)
+#define N_EXP(a) _n_dom_exp((a), _n_exp_fallback(a))
 #endif
 
 #ifndef N_LOG
@@ -1881,7 +1933,7 @@ static N_FORCEINLINE n_float _n_log_fallback(n_float a) {
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::logf(lane[i]);
   return n_load_ps(lane);
 }
-#define N_LOG(a) _n_log_fallback(a)
+#define N_LOG(a) _n_dom_log((a), _n_log_fallback(a))
 #endif
 
 #ifndef N_LOG10
