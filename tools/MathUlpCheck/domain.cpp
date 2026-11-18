@@ -84,9 +84,9 @@ int main()
     Unary("tan",   [](n_float v) { return N_TAN(v); },   RefTan,   special, nSpecial);
     Unary("atan",  [](n_float v) { return N_ATAN(v); },  RefAtan,  special, nSpecial);
 
-    const float unit[] = { -1.0f, -0.5f, 0.0f, -0.0f, 0.5f, 1.0f };
-    Unary("asin", [](n_float v) { return N_ASIN(v); }, RefAsin, unit, 6);
-    Unary("acos", [](n_float v) { return N_ACOS(v); }, RefAcos, unit, 6);
+    const float unit[] = { -1.0f, -0.5f, 0.0f, -0.0f, 0.5f, 1.0f, 2.0f, -2.0f, INFINITY, -INFINITY, NAN };
+    Unary("asin", [](n_float v) { return N_ASIN(v); }, RefAsin, unit, 11);
+    Unary("acos", [](n_float v) { return N_ACOS(v); }, RefAcos, unit, 11);
 
     const float pb[] = { -2.0f, -2.0f, -2.0f, -2.0f, -1.0f, -1.0f, -0.0f, -0.0f, 0.0f, 0.0f, 2.0f, 0.0f, -3.0f, 3.0f };
     const float pe[] = { 3.0f, -3.0f, 2.0f, 2.5f, 1e30f, 2.0f, 3.0f, -3.0f, 2.0f, -2.0f, 0.5f, 0.0f, 7.0f, 0.0f };
