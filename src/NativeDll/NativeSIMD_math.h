@@ -2185,7 +2185,7 @@ static N_FORCEINLINE n_double _n_sin_avx2_pd(n_double d) {
     result = _mm256_blendv_pd(result, _mm256_xor_pd(_mm256_castsi256_pd(_mm256_set1_epi64x(0x8000000000000000)), result), _mm256_castps_pd(neg_mask));
     return result;
 }
-#define N_SIN_PD(a) [&](n_float _v) { return _n_sin_avx2_pd(_v); }((a))
+#define N_SIN_PD(a) [&](n_double _v) { return _n_sin_avx2_pd(_v); }((a))
 #define N_COS_PD(a) _n_sin_avx2_pd(_mm256_add_pd(a, _mm256_set1_pd(1.5707963267948966)))
 
 #elif defined(NSIMD_AVX512)
@@ -2201,12 +2201,12 @@ static N_FORCEINLINE n_double _n_cos_pd_avx512(n_double a) {
     for (int i = 0; i < w; i++) lane[i] = cos(lane[i]);
     return n_load_pd(lane);
 }
-#define N_SIN_PD(a) [&](n_float _v) { return _n_sin_pd_avx512(_v); }((a))
-#define N_COS_PD(a) [&](n_float _v) { return _n_cos_pd_avx512(_v); }((a))
+#define N_SIN_PD(a) [&](n_double _v) { return _n_sin_pd_avx512(_v); }((a))
+#define N_COS_PD(a) [&](n_double _v) { return _n_cos_pd_avx512(_v); }((a))
 
 #elif defined(NSIMD_SSE4) && defined(__aarch64__)
 // SSE4: use scalar per-lane for each double lane (only 2-wide anyway, scalar is fine)
-#define N_SIN_PD(a) [&](n_float _v) { return _n_sin_pd_fallback(_v); }((a))
+#define N_SIN_PD(a) [&](n_double _v) { return _n_sin_pd_fallback(_v); }((a))
 #else
 // Fallback: per-lane scalar sin/cos
 static N_FORCEINLINE n_double _n_sin_pd_fallback(n_double a) {
@@ -2221,8 +2221,8 @@ static N_FORCEINLINE n_double _n_cos_pd_fallback(n_double a) {
     for (int i = 0; i < w; i++) lane[i] = cos(lane[i]);
     return n_load_pd(lane);
 }
-#define N_SIN_PD(a) [&](n_float _v) { return _n_sin_pd_fallback(_v); }((a))
-#define N_COS_PD(a) [&](n_float _v) { return _n_cos_pd_fallback(_v); }((a))
+#define N_SIN_PD(a) [&](n_double _v) { return _n_sin_pd_fallback(_v); }((a))
+#define N_COS_PD(a) [&](n_double _v) { return _n_cos_pd_fallback(_v); }((a))
 #endif
 
 #ifndef N_COS_PD
@@ -2232,7 +2232,7 @@ static N_FORCEINLINE n_double _n_cos_pd_fallback(n_double a) {
     for (int i = 0; i < w; i++) lane[i] = cos(lane[i]);
     return n_load_pd(lane);
 }
-#define N_COS_PD(a) [&](n_float _v) { return _n_cos_pd_fallback(_v); }((a))
+#define N_COS_PD(a) [&](n_double _v) { return _n_cos_pd_fallback(_v); }((a))
 #endif
 
 // Public API
