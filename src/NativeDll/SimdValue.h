@@ -98,7 +98,7 @@ struct simd_value<float> {
     simd_value round() const { return simd_value{ n_round_ps(v) }; }
     simd_value trunc() const { return simd_value{ n_trunc_ps(v) }; }
 
-    // Full-Width SIMD: transcendental functions via SLEEF
+    // 整宽向量超越函数：直调 NativeSIMD_math.h 的 n_*_ps（定义域与精度档在那一层统一）
     simd_value sin()    const { return simd_value{ n_sin_ps(v) }; }
     simd_value cos()    const { return simd_value{ n_cos_ps(v) }; }
     simd_value tan()    const { return simd_value{ n_tan_ps(v) }; }
@@ -730,7 +730,7 @@ static inline int hmin(simd_value<int> v) { return n_hmin_epi32(v.v); }
 static inline int hmax(simd_value<int> v) { return n_hmax_epi32(v.v); }
 static inline int hmin_idx(simd_value<float> val, simd_value<int> idx) { return n_hmin_idx(val.v, idx.v); }
 
-// Vector math via SLEEF (ADL targets for auto-SIMD generated code)
+// 向量数学入口（ADL 目标，供 AutoSIMD 生成的代码按名调用）
 // sin/cos/log/exp/... dispatch to n_sin_ps from NativeSIMD_math.h
 #include <cmath>
 static inline simd_value<float> sin(simd_value<float> v)   { return simd_value<float>{ n_sin_ps(v.v) }; }

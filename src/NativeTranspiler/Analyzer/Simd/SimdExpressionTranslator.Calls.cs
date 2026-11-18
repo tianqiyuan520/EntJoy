@@ -22,7 +22,7 @@ namespace NativeTranspiler.Analyzer
                 string? fnName = ident?.Name.Identifier.Text;
                 if (fnName != null)
                 {
-                    // Try TranslateMathFFunction first (has Sin/Cos/Sqrt/SLEEF cases for PascalCase names)
+                    // 先试 TranslateMathFFunction（Sin/Cos/Sqrt 等 PascalCase 名字在那里有映射）
                     string fc1 = TranslateMathFFunction(fnName, invocation);
                     if (!fc1.Contains("/* unknown") && !fc1.Contains("EntJoy::Mathematics"))
                         return fc1;
@@ -294,7 +294,7 @@ namespace NativeTranspiler.Analyzer
                     break;
                 }
 
-                // Lightweight native SIMD (no SLEEF needed)
+                // 轻量向量化：ceil/round 等直接走 n_*_ps 内建
                 case "Ceiling":
                 {
                     if (args.Count >= 1)
@@ -332,7 +332,7 @@ namespace NativeTranspiler.Analyzer
                     break;
                 }
 
-                // SLEEF transcendental functions (single-argument)
+                // 超越函数（单参数）：n_sin_ps / n_exp_ps 等，定义域由 NativeSIMD_math.h 的 _n_dom_* 统一处理
                 case "Sin":  case "Cos":  case "Tan":
                 case "Asin": case "Acos": case "Atan":
                 case "Sinh": case "Cosh": case "Tanh":
@@ -344,15 +344,15 @@ namespace NativeTranspiler.Analyzer
                         VarKind kv = _varAnalyzer.ClassifyExpression(args[0].Expression);
                         if (kv >= VarKind.Varying)
                         {
-                            string sleefFn = $"n_{methodName.ToLowerInvariant()}_ps";
-                            return $"simd_value<float>{{ {sleefFn}({v}.v) }}";
+                            string mathFn = $"n_{methodName.ToLowerInvariant()}_ps";
+                            return $"simd_value<float>{{ {mathFn}({v}.v) }}";
                         }
                         return $"std::{methodName.ToLowerInvariant()}({v})";
                     }
                     break;
                 }
 
-                // SLEEF two-argument functions：任一实参变化就走向量路径，常量实参按 lane 广播
+                // 双参数函数：任一实参变化就走向量路径，常量实参按 lane 广播
                 case "Atan2":
                 {
                     if (args.Count >= 2)
