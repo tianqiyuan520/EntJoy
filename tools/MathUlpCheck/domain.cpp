@@ -124,6 +124,20 @@ int main()
         }
     }
 
+    // 宏参数只求值一次：N_* 用 lambda 接收实参，带副作用的表达式也只执行一次
+    {
+        int calls = 0;
+        auto bump = [&calls](n_float v) { ++calls; return v; };
+        alignas(64) float one[NSIMD_WIDTH];
+        for (int k = 0; k < NSIMD_WIDTH; k++) one[k] = 2.0f;
+        n_float v = n_load_ps(one);
+        calls = 0; (void)N_LOG(bump(v));
+        if (calls != 1) { std::printf("  [FAIL] N_LOG 求值 %d 次\n", calls); g_failed = true; }
+        calls = 0; (void)N_TAN(bump(v));
+        if (calls != 1) { std::printf("  [FAIL] N_TAN 求值 %d 次\n", calls); g_failed = true; }
+        calls = 0; (void)N_POW(bump(v), bump(v));
+        if (calls != 2) { std::printf("  [FAIL] N_POW 求值 %d 次\n", calls); g_failed = true; }
+    }
     std::printf("%d 项检查，%s\n", g_checks, g_failed ? "FAIL" : "PASS");
     return g_failed ? 1 : 0;
 }

@@ -23,14 +23,14 @@
 static N_FORCEINLINE n_float _n_dom_exp(n_float x, n_float r) {
   r = n_blendv_ps(r, n_set1_ps(INFINITY), n_cmp_eq_ps(x, n_set1_ps(INFINITY)));
   r = n_blendv_ps(r, n_set1_ps(0.0f), n_cmp_eq_ps(x, n_set1_ps(-INFINITY)));
-  return n_blendv_ps(r, x, n_cmp_ne_ps(x, x));
+  return n_blendv_ps(r, x, n_is_nan_ps(x));
 }
 
 static N_FORCEINLINE n_float _n_dom_log(n_float x, n_float r) {
   r = n_blendv_ps(r, n_set1_ps(-INFINITY), n_cmp_eq_ps(x, n_set1_ps(0.0f)));
   r = n_blendv_ps(r, n_set1_ps(NAN), n_cmp_lt_ps(x, n_set1_ps(0.0f)));
   r = n_blendv_ps(r, n_set1_ps(INFINITY), n_cmp_eq_ps(x, n_set1_ps(INFINITY)));
-  return n_blendv_ps(r, x, n_cmp_ne_ps(x, x));
+  return n_blendv_ps(r, x, n_is_nan_ps(x));
 }
 
 static N_FORCEINLINE n_float _n_dom_pow(n_float x, n_float y, n_float r) {
@@ -52,12 +52,12 @@ static N_FORCEINLINE n_float _n_dom_pow(n_float x, n_float y, n_float r) {
   r = n_blendv_ps(r, n_blendv_ps(zero, inf, yPos), n_and_mask(xInf, n_not_mask(xNeg)));
   r = n_blendv_ps(r, one, n_cmp_eq_ps(x, one));
   r = n_blendv_ps(r, one, yZero);
-  return n_blendv_ps(r, n_set1_ps(NAN), n_or_mask(n_cmp_ne_ps(x, x), n_cmp_ne_ps(y, y)));
+  return n_blendv_ps(r, n_set1_ps(NAN), n_or_mask(n_is_nan_ps(x), n_is_nan_ps(y)));
 }
 static N_FORCEINLINE n_float _n_dom_tanh(n_float x, n_float r) {
   n_float one = n_blendv_ps(n_set1_ps(1.0f), n_set1_ps(-1.0f), n_cmp_lt_ps(x, n_set1_ps(0.0f)));
   r = n_blendv_ps(r, one, n_cmp_gt_ps(n_fabs_ps(x), n_set1_ps(20.0f)));
-  return n_blendv_ps(r, x, n_cmp_ne_ps(x, x));
+  return n_blendv_ps(r, x, n_is_nan_ps(x));
 }
 
 static N_FORCEINLINE n_float _n_dom_atan2(n_float y, n_float x, n_float r) {
@@ -93,13 +93,13 @@ static N_FORCEINLINE n_float _n_dom_odd_zero(n_float x, n_float r) {
 // asin/acos 的定义域：|x| > 1 为 NaN；acos(1) 精确为 +0
 static N_FORCEINLINE n_float _n_dom_asin(n_float x, n_float r) {
   r = n_blendv_ps(r, n_set1_ps(NAN), n_cmp_gt_ps(n_fabs_ps(x), n_set1_ps(1.0f)));
-  return n_blendv_ps(r, x, n_cmp_ne_ps(x, x));
+  return n_blendv_ps(r, x, n_is_nan_ps(x));
 }
 
 static N_FORCEINLINE n_float _n_dom_acos(n_float x, n_float r) {
   r = n_blendv_ps(r, n_set1_ps(NAN), n_cmp_gt_ps(n_fabs_ps(x), n_set1_ps(1.0f)));
   r = n_blendv_ps(r, n_set1_ps(0.0f), n_cmp_eq_ps(x, n_set1_ps(1.0f)));
-  return n_blendv_ps(r, x, n_cmp_ne_ps(x, x));
+  return n_blendv_ps(r, x, n_is_nan_ps(x));
 }
 // 三角函数的大参数：Cody-Waite 归约在 1e7 之上不可靠（tan 还会因 sin/cos 分别回退而相除出 0/0），
 // 超过阈值整 lane 走 libm。三个入口共用同一实现，新增函数只需换 libm 指针。
@@ -1671,71 +1671,71 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
 
   // Inline AVX512 (16-wide) / AVX2 (8-wide) polynomial (fastest, zero function-call overhead)
   #if defined(NSIMD_AVX512)
-    #define N_SIN(a) _n_dom_odd_zero((a), _n_sin_big((a), _n_sin_avx512(a)))
-    #define N_COS(a) _n_cos_big((a), _n_cos_avx512(a))
-    #define N_LOG(a) _n_dom_log((a), _n_log_avx512(a))
-    #define N_EXP(a) _n_dom_exp((a), _n_exp_avx512(a))
-    #define N_LOG10(a)   _mm512_mul_ps(N_LOG(a), _mm512_set1_ps(0.4342944819032518f))
-    #define N_POW(a,b) _n_dom_pow((a), (b), _n_pow_avx512(a, b))
-  #define N_TAN(a) _n_dom_odd_zero((a), _n_tan_big((a), _n_tan_avx512(a)))
-  #define N_ASIN(a) _n_dom_odd_zero((a), _n_dom_asin((a), _n_asin_avx512(a)))
-  #define N_ACOS(a) _n_dom_acos((a), _n_acos_avx512(a))
-  #define N_ATAN(a) _n_dom_odd_zero((a), _n_atan_avx512(a))
-  #define N_ATAN2(a,b) _n_dom_atan2((a), (b), _n_atan2_avx512(a, b))
-  #define N_SINH(a) _n_dom_odd_zero((a), _n_sinh_avx512(a))
-  #define N_COSH(a)      _n_cosh_avx512(a)
-  #define N_TANH(a) _n_dom_odd_zero((a), _n_dom_tanh((a), _n_tanh_avx512(a)))
+    #define N_SIN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_sin_big((_v), _n_sin_avx512(_v))); }((a))
+    #define N_COS(a) [&](n_float _v) { return _n_cos_big((_v), _n_cos_avx512(_v)); }((a))
+    #define N_LOG(a) [&](n_float _v) { return _n_dom_log((_v), _n_log_avx512(_v)); }((a))
+    #define N_EXP(a) [&](n_float _v) { return _n_dom_exp((_v), _n_exp_avx512(_v)); }((a))
+    #define N_LOG10(a) [&](n_float _v) { return _mm512_mul_ps(N_LOG(_v), _mm512_set1_ps(0.4342944819032518f)); }((a))
+    #define N_POW(a,b) [&](n_float _va, n_float _vb) { return _n_dom_pow((_va), (_vb), _n_pow_avx512(_va, _vb)); }((a), (b))
+  #define N_TAN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_tan_big((_v), _n_tan_avx512(_v))); }((a))
+  #define N_ASIN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_dom_asin((_v), _n_asin_avx512(_v))); }((a))
+  #define N_ACOS(a) [&](n_float _v) { return _n_dom_acos((_v), _n_acos_avx512(_v)); }((a))
+  #define N_ATAN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_atan_avx512(_v)); }((a))
+  #define N_ATAN2(a,b) [&](n_float _va, n_float _vb) { return _n_dom_atan2((_va), (_vb), _n_atan2_avx512(_va, _vb)); }((a), (b))
+  #define N_SINH(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_sinh_avx512(_v)); }((a))
+  #define N_COSH(a) [&](n_float _v) { return _n_cosh_avx512(_v); }((a))
+  #define N_TANH(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_dom_tanh((_v), _n_tanh_avx512(_v))); }((a))
   #define N_SINCOS(a,s,c) _n_sincos_avx512(a, s, c)
   #elif defined(NSIMD_AVX2)
-    #define N_SIN(a) _n_dom_odd_zero((a), _n_sin_big((a), _n_sin_avx2(a)))
-    #define N_COS(a) _n_cos_big((a), _n_cos_avx2(a))
-    #define N_LOG(a) _n_dom_log((a), _n_log_avx2(a))
-    #define N_EXP(a) _n_dom_exp((a), _n_exp_avx2(a))
-    #define N_LOG10(a)   _mm256_mul_ps(N_LOG(a), _mm256_set1_ps(0.4342944819032518f))
+    #define N_SIN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_sin_big((_v), _n_sin_avx2(_v))); }((a))
+    #define N_COS(a) [&](n_float _v) { return _n_cos_big((_v), _n_cos_avx2(_v)); }((a))
+    #define N_LOG(a) [&](n_float _v) { return _n_dom_log((_v), _n_log_avx2(_v)); }((a))
+    #define N_EXP(a) [&](n_float _v) { return _n_dom_exp((_v), _n_exp_avx2(_v)); }((a))
+    #define N_LOG10(a) [&](n_float _v) { return _mm256_mul_ps(N_LOG(_v), _mm256_set1_ps(0.4342944819032518f)); }((a))
   #elif defined(NSIMD_SSE4)
-  #define N_SIN(a) _n_dom_odd_zero((a), _n_sin_big((a), _n_sin_sse41(a)))
-  #define N_COS(a) _n_cos_big((a), _n_cos_sse41(a))
-  #define N_LOG(a) _n_dom_log((a), _n_log_sse41(a))
-  #define N_EXP(a) _n_dom_exp((a), _n_exp_sse41(a))
-  #define N_LOG10(a)   _mm_mul_ps(N_LOG(a), _mm_set1_ps(0.4342944819032518f))
+  #define N_SIN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_sin_big((_v), _n_sin_sse41(_v))); }((a))
+  #define N_COS(a) [&](n_float _v) { return _n_cos_big((_v), _n_cos_sse41(_v)); }((a))
+  #define N_LOG(a) [&](n_float _v) { return _n_dom_log((_v), _n_log_sse41(_v)); }((a))
+  #define N_EXP(a) [&](n_float _v) { return _n_dom_exp((_v), _n_exp_sse41(_v)); }((a))
+  #define N_LOG10(a) [&](n_float _v) { return _mm_mul_ps(N_LOG(_v), _mm_set1_ps(0.4342944819032518f)); }((a))
   // pow 在 SSE4 上走 libm 回退：无 FMA 时 log2/exp2 精度不足，守不住 ULP 门禁
-  #define N_TAN(a) _n_dom_odd_zero((a), _n_tan_big((a), _n_tan_sse41(a)))
-  #define N_ASIN(a) _n_dom_odd_zero((a), _n_dom_asin((a), _n_asin_sse41(a)))
-  #define N_ACOS(a) _n_dom_acos((a), _n_acos_sse41(a))
-  #define N_ATAN(a) _n_dom_odd_zero((a), _n_atan_sse41(a))
-  #define N_ATAN2(a,b) _n_dom_atan2((a), (b), _n_atan2_sse41(a, b))
-  #define N_SINH(a) _n_dom_odd_zero((a), _n_sinh_sse41(a))
-  #define N_COSH(a)      _n_cosh_sse41(a)
-  #define N_TANH(a) _n_dom_odd_zero((a), _n_dom_tanh((a), _n_tanh_sse41(a)))
+  #define N_TAN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_tan_big((_v), _n_tan_sse41(_v))); }((a))
+  #define N_ASIN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_dom_asin((_v), _n_asin_sse41(_v))); }((a))
+  #define N_ACOS(a) [&](n_float _v) { return _n_dom_acos((_v), _n_acos_sse41(_v)); }((a))
+  #define N_ATAN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_atan_sse41(_v)); }((a))
+  #define N_ATAN2(a,b) [&](n_float _va, n_float _vb) { return _n_dom_atan2((_va), (_vb), _n_atan2_sse41(_va, _vb)); }((a), (b))
+  #define N_SINH(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_sinh_sse41(_v)); }((a))
+  #define N_COSH(a) [&](n_float _v) { return _n_cosh_sse41(_v); }((a))
+  #define N_TANH(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_dom_tanh((_v), _n_tanh_sse41(_v))); }((a))
   #define N_SINCOS(a,s,c) _n_sincos_sse41(a, s, c)
 #elif defined(NSIMD_NEON) && defined(__aarch64__)
-#define N_SIN(a) _n_dom_odd_zero((a), _n_sin_big((a), _n_sin_neon(a)))
-#define N_COS(a) _n_cos_big((a), _n_cos_neon(a))
-#define N_LOG(a) _n_dom_log((a), _n_log_neon(a))
-#define N_EXP(a) _n_dom_exp((a), _n_exp_neon(a))
-#define N_LOG10(a)   vmulq_f32(N_LOG(a), vdupq_n_f32(0.4342944819032518f))
+#define N_SIN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_sin_big((_v), _n_sin_neon(_v))); }((a))
+#define N_COS(a) [&](n_float _v) { return _n_cos_big((_v), _n_cos_neon(_v)); }((a))
+#define N_LOG(a) [&](n_float _v) { return _n_dom_log((_v), _n_log_neon(_v)); }((a))
+#define N_EXP(a) [&](n_float _v) { return _n_dom_exp((_v), _n_exp_neon(_v)); }((a))
+#define N_LOG10(a) [&](n_float _v) { return vmulq_f32(N_LOG(_v), vdupq_n_f32(0.4342944819032518f)); }((a))
   #endif
 #if defined(NSIMD_AVX2) && !defined(NSIMD_AVX512)
-    #define N_TAN(a) _n_dom_odd_zero((a), _n_tan_big((a), _n_tan_ps(a)))
-    #define N_ASIN(a) _n_dom_odd_zero((a), _n_dom_asin((a), _n_asin_ps(a)))
-    #define N_ACOS(a) _n_dom_acos((a), _n_acos_ps(a))
-    #define N_ATAN(a) _n_dom_odd_zero((a), _n_atan_ps(a))
-    #define N_ATAN2(a,b) _n_dom_atan2((a), (b), _n_atan2_ps(a, b))
-    #define N_SINH(a) _n_dom_odd_zero((a), _n_sinh_ps(a))
-    #define N_COSH(a)      _n_cosh_ps(a)
-    #define N_TANH(a) _n_dom_odd_zero((a), _n_dom_tanh((a), _n_tanh_ps(a)))
-    #define N_POW(a,b) _n_dom_pow((a), (b), _n_pow_avx2_ps(a, b))
+    #define N_TAN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_tan_big((_v), _n_tan_ps(_v))); }((a))
+    #define N_ASIN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_dom_asin((_v), _n_asin_ps(_v))); }((a))
+    #define N_ACOS(a) [&](n_float _v) { return _n_dom_acos((_v), _n_acos_ps(_v)); }((a))
+    #define N_ATAN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_atan_ps(_v)); }((a))
+    #define N_ATAN2(a,b) [&](n_float _va, n_float _vb) { return _n_dom_atan2((_va), (_vb), _n_atan2_ps(_va, _vb)); }((a), (b))
+    #define N_SINH(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_sinh_ps(_v)); }((a))
+    #define N_COSH(a) [&](n_float _v) { return _n_cosh_ps(_v); }((a))
+    #define N_TANH(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_dom_tanh((_v), _n_tanh_ps(_v))); }((a))
+    #define N_POW(a,b) [&](n_float _va, n_float _vb) { return _n_dom_pow((_va), (_vb), _n_pow_avx2_ps(_va, _vb)); }((a), (b))
     #define N_SINCOS(a,s,c) _n_sincos_ps(a, s, c)
 #elif defined(NSIMD_NEON) && defined(__aarch64__)
-    #define N_TAN(a) _n_dom_odd_zero((a), _n_tan_big((a), vdivq_f32(_n_sin_neon(a), _n_cos_neon(a))))
-    #define N_ASIN(a) _n_dom_odd_zero((a), _n_dom_asin((a), _n_asin_neon(a)))
-    #define N_ACOS(a) _n_dom_acos((a), _n_acos_neon(a))
-    #define N_ATAN(a) _n_dom_odd_zero((a), _n_atan_neon(a))
-    #define N_ATAN2(a,b) _n_dom_atan2((a), (b), _n_atan2_neon(a, b))
-    #define N_SINH(a) _n_dom_odd_zero((a), _n_sinh_neon(a))
-    #define N_COSH(a)      _n_cosh_neon(a)
-    #define N_TANH(a) _n_dom_odd_zero((a), _n_dom_tanh((a), _n_tanh_neon(a)))
-    #define N_POW(a,b) _n_dom_pow((a), (b), _n_pow_neon(a, b))
+    #define N_TAN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_tan_big((_v), vdivq_f32(_n_sin_neon(_v), _n_cos_neon(_v)))); }((a))
+    #define N_ASIN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_dom_asin((_v), _n_asin_neon(_v))); }((a))
+    #define N_ACOS(a) [&](n_float _v) { return _n_dom_acos((_v), _n_acos_neon(_v)); }((a))
+    #define N_ATAN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_atan_neon(_v)); }((a))
+    #define N_ATAN2(a,b) [&](n_float _va, n_float _vb) { return _n_dom_atan2((_va), (_vb), _n_atan2_neon(_va, _vb)); }((a), (b))
+    #define N_SINH(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_sinh_neon(_v)); }((a))
+    #define N_COSH(a) [&](n_float _v) { return _n_cosh_neon(_v); }((a))
+    #define N_TANH(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_dom_tanh((_v), _n_tanh_neon(_v))); }((a))
+    #define N_POW(a,b) [&](n_float _va, n_float _vb) { return _n_dom_pow((_va), (_vb), _n_pow_neon(_va, _vb)); }((a), (b))
     #define N_SINCOS(a,s,c) _n_sincos_neon(a, s, c)
 #endif
   // Non-AVX2: #ifndef guards below provide per-lane scalar fallback
@@ -1746,71 +1746,71 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
 // ===== High (~1.0 ULP) =====
 #elif SIMD_MATH_PRECISION == 2
   #if defined(NSIMD_AVX512)
-    #define N_SIN(a) _n_dom_odd_zero((a), _n_sin_big((a), _n_high_sin_avx512(a)))
-    #define N_COS(a) _n_cos_big((a), _n_high_cos_avx512(a))
-    #define N_TAN(a) _n_dom_odd_zero((a), _n_tan_big((a), _n_high_tan_avx512(a)))
-    #define N_ASIN(a) _n_dom_odd_zero((a), _n_dom_asin((a), _n_high_asin_avx512(a)))
-    #define N_ACOS(a) _n_dom_acos((a), _n_high_acos_avx512(a))
-    #define N_ATAN(a) _n_dom_odd_zero((a), _n_high_atan_avx512(a))
-    #define N_ATAN2(a,b) _n_dom_atan2((a), (b), _n_high_atan2_avx512(a, b))
-    #define N_SINH(a) _n_dom_odd_zero((a), _n_high_sinh_avx512(a))
-    #define N_COSH(a)      _n_high_cosh_avx512(a)
-    #define N_TANH(a) _n_dom_odd_zero((a), _n_dom_tanh((a), _n_high_tanh_avx512(a)))
-    #define N_EXP(a) _n_dom_exp((a), _n_high_exp_avx512(a))
-    #define N_LOG(a) _n_dom_log((a), _n_high_log_avx512(a))
-    #define N_LOG10(a)     _n_high_log10_avx512(a)
-    #define N_POW(a,b) _n_dom_pow((a), (b), _n_pow_avx512(a, b))
+    #define N_SIN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_sin_big((_v), _n_high_sin_avx512(_v))); }((a))
+    #define N_COS(a) [&](n_float _v) { return _n_cos_big((_v), _n_high_cos_avx512(_v)); }((a))
+    #define N_TAN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_tan_big((_v), _n_high_tan_avx512(_v))); }((a))
+    #define N_ASIN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_dom_asin((_v), _n_high_asin_avx512(_v))); }((a))
+    #define N_ACOS(a) [&](n_float _v) { return _n_dom_acos((_v), _n_high_acos_avx512(_v)); }((a))
+    #define N_ATAN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_high_atan_avx512(_v)); }((a))
+    #define N_ATAN2(a,b) [&](n_float _va, n_float _vb) { return _n_dom_atan2((_va), (_vb), _n_high_atan2_avx512(_va, _vb)); }((a), (b))
+    #define N_SINH(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_high_sinh_avx512(_v)); }((a))
+    #define N_COSH(a) [&](n_float _v) { return _n_high_cosh_avx512(_v); }((a))
+    #define N_TANH(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_dom_tanh((_v), _n_high_tanh_avx512(_v))); }((a))
+    #define N_EXP(a) [&](n_float _v) { return _n_dom_exp((_v), _n_high_exp_avx512(_v)); }((a))
+    #define N_LOG(a) [&](n_float _v) { return _n_dom_log((_v), _n_high_log_avx512(_v)); }((a))
+    #define N_LOG10(a) [&](n_float _v) { return _n_high_log10_avx512(_v); }((a))
+    #define N_POW(a,b) [&](n_float _va, n_float _vb) { return _n_dom_pow((_va), (_vb), _n_pow_avx512(_va, _vb)); }((a), (b))
     #define N_SINCOS(a,s,c) _n_high_sincos_avx512(a, s, c)
   #elif defined(NSIMD_SSE4)
     // SSE4.1 无 FMA、只有 4 lane：double lane 方案实测比 libm 慢（0.32–0.79x），
     // 因此 High 档复用 float 域实现（1–3 ULP），仍快于逐 lane libm。
-    #define N_SIN(a) _n_dom_odd_zero((a), _n_sin_big((a), _n_sin_sse41(a)))
-    #define N_COS(a) _n_cos_big((a), _n_cos_sse41(a))
-    #define N_TAN(a) _n_dom_odd_zero((a), _n_tan_big((a), _n_tan_sse41(a)))
-    #define N_ASIN(a) _n_dom_odd_zero((a), _n_dom_asin((a), _n_asin_sse41(a)))
-    #define N_ACOS(a) _n_dom_acos((a), _n_acos_sse41(a))
-    #define N_ATAN(a) _n_dom_odd_zero((a), _n_atan_sse41(a))
-    #define N_ATAN2(a,b) _n_dom_atan2((a), (b), _n_atan2_sse41(a, b))
-    #define N_SINH(a) _n_dom_odd_zero((a), _n_sinh_sse41(a))
-    #define N_COSH(a)      _n_cosh_sse41(a)
-    #define N_TANH(a) _n_dom_odd_zero((a), _n_dom_tanh((a), _n_tanh_sse41(a)))
-    #define N_EXP(a) _n_dom_exp((a), _n_exp_sse41(a))
-    #define N_LOG(a) _n_dom_log((a), _n_log_sse41(a))
-    #define N_LOG10(a)     _n_log10_sse41(a)
+    #define N_SIN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_sin_big((_v), _n_sin_sse41(_v))); }((a))
+    #define N_COS(a) [&](n_float _v) { return _n_cos_big((_v), _n_cos_sse41(_v)); }((a))
+    #define N_TAN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_tan_big((_v), _n_tan_sse41(_v))); }((a))
+    #define N_ASIN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_dom_asin((_v), _n_asin_sse41(_v))); }((a))
+    #define N_ACOS(a) [&](n_float _v) { return _n_dom_acos((_v), _n_acos_sse41(_v)); }((a))
+    #define N_ATAN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_atan_sse41(_v)); }((a))
+    #define N_ATAN2(a,b) [&](n_float _va, n_float _vb) { return _n_dom_atan2((_va), (_vb), _n_atan2_sse41(_va, _vb)); }((a), (b))
+    #define N_SINH(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_sinh_sse41(_v)); }((a))
+    #define N_COSH(a) [&](n_float _v) { return _n_cosh_sse41(_v); }((a))
+    #define N_TANH(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_dom_tanh((_v), _n_tanh_sse41(_v))); }((a))
+    #define N_EXP(a) [&](n_float _v) { return _n_dom_exp((_v), _n_exp_sse41(_v)); }((a))
+    #define N_LOG(a) [&](n_float _v) { return _n_dom_log((_v), _n_log_sse41(_v)); }((a))
+    #define N_LOG10(a) [&](n_float _v) { return _n_log10_sse41(_v); }((a))
   // pow 在 SSE4 上走 libm 回退（无 FMA 时 log2/exp2 精度不足）
     #define N_SINCOS(a,s,c) _n_sincos_sse41(a, s, c)
   #elif defined(NSIMD_NEON) && defined(__aarch64__)
-    #define N_SIN(a) _n_dom_odd_zero((a), _n_sin_big((a), _n_high_sin_neon(a)))
-    #define N_COS(a) _n_cos_big((a), _n_high_cos_neon(a))
-    #define N_TAN(a) _n_dom_odd_zero((a), _n_tan_big((a), _n_high_tan_neon(a)))
-    #define N_ASIN(a) _n_dom_odd_zero((a), _n_dom_asin((a), _n_high_asin_neon(a)))
-    #define N_ACOS(a) _n_dom_acos((a), _n_high_acos_neon(a))
-    #define N_ATAN(a) _n_dom_odd_zero((a), _n_high_atan_neon(a))
-    #define N_ATAN2(a,b) _n_dom_atan2((a), (b), _n_high_atan2_neon(a, b))
-    #define N_SINH(a) _n_dom_odd_zero((a), _n_high_sinh_neon(a))
-    #define N_COSH(a)      _n_high_cosh_neon(a)
-    #define N_TANH(a) _n_dom_odd_zero((a), _n_dom_tanh((a), _n_high_tanh_neon(a)))
-    #define N_EXP(a) _n_dom_exp((a), _n_high_exp_neon(a))
-    #define N_LOG(a) _n_dom_log((a), _n_high_log_neon(a))
-    #define N_LOG10(a)     _n_high_log10_neon(a)
+    #define N_SIN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_sin_big((_v), _n_high_sin_neon(_v))); }((a))
+    #define N_COS(a) [&](n_float _v) { return _n_cos_big((_v), _n_high_cos_neon(_v)); }((a))
+    #define N_TAN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_tan_big((_v), _n_high_tan_neon(_v))); }((a))
+    #define N_ASIN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_dom_asin((_v), _n_high_asin_neon(_v))); }((a))
+    #define N_ACOS(a) [&](n_float _v) { return _n_dom_acos((_v), _n_high_acos_neon(_v)); }((a))
+    #define N_ATAN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_high_atan_neon(_v)); }((a))
+    #define N_ATAN2(a,b) [&](n_float _va, n_float _vb) { return _n_dom_atan2((_va), (_vb), _n_high_atan2_neon(_va, _vb)); }((a), (b))
+    #define N_SINH(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_high_sinh_neon(_v)); }((a))
+    #define N_COSH(a) [&](n_float _v) { return _n_high_cosh_neon(_v); }((a))
+    #define N_TANH(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_dom_tanh((_v), _n_high_tanh_neon(_v))); }((a))
+    #define N_EXP(a) [&](n_float _v) { return _n_dom_exp((_v), _n_high_exp_neon(_v)); }((a))
+    #define N_LOG(a) [&](n_float _v) { return _n_dom_log((_v), _n_high_log_neon(_v)); }((a))
+    #define N_LOG10(a) [&](n_float _v) { return _n_high_log10_neon(_v); }((a))
     // pow 在 NEON High 上走 libm 回退：double lane 版尚未处理负底数/零底数定义域
     #define N_SINCOS(a,s,c) _n_high_sincos_neon(a, s, c)
   #elif defined(NSIMD_AVX2)
-    #define N_SIN(a) _n_dom_odd_zero((a), _n_sin_big((a), _n_high_sin(a)))
-    #define N_COS(a) _n_cos_big((a), _n_high_cos(a))
-    #define N_TAN(a) _n_dom_odd_zero((a), _n_tan_big((a), _n_high_tan(a)))
-    #define N_ASIN(a) _n_dom_odd_zero((a), _n_dom_asin((a), _n_high_asin(a)))
-    #define N_ACOS(a) _n_dom_acos((a), _n_high_acos(a))
-    #define N_ATAN(a) _n_dom_odd_zero((a), _n_high_atan(a))
-    #define N_ATAN2(a,b) _n_dom_atan2((a), (b), _n_high_atan2(a, b))
-    #define N_SINH(a) _n_dom_odd_zero((a), _n_high_sinh(a))
-    #define N_COSH(a)      _n_high_cosh(a)
-    #define N_TANH(a) _n_dom_odd_zero((a), _n_dom_tanh((a), _n_high_tanh(a)))
-    #define N_EXP(a) _n_dom_exp((a), _n_high_exp(a))
-    #define N_LOG(a) _n_dom_log((a), _n_high_log(a))
-    #define N_LOG10(a)     _n_high_log10(a)
+    #define N_SIN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_sin_big((_v), _n_high_sin(_v))); }((a))
+    #define N_COS(a) [&](n_float _v) { return _n_cos_big((_v), _n_high_cos(_v)); }((a))
+    #define N_TAN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_tan_big((_v), _n_high_tan(_v))); }((a))
+    #define N_ASIN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_dom_asin((_v), _n_high_asin(_v))); }((a))
+    #define N_ACOS(a) [&](n_float _v) { return _n_dom_acos((_v), _n_high_acos(_v)); }((a))
+    #define N_ATAN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_high_atan(_v)); }((a))
+    #define N_ATAN2(a,b) [&](n_float _va, n_float _vb) { return _n_dom_atan2((_va), (_vb), _n_high_atan2(_va, _vb)); }((a), (b))
+    #define N_SINH(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_high_sinh(_v)); }((a))
+    #define N_COSH(a) [&](n_float _v) { return _n_high_cosh(_v); }((a))
+    #define N_TANH(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_dom_tanh((_v), _n_high_tanh(_v))); }((a))
+    #define N_EXP(a) [&](n_float _v) { return _n_dom_exp((_v), _n_high_exp(_v)); }((a))
+    #define N_LOG(a) [&](n_float _v) { return _n_dom_log((_v), _n_high_log(_v)); }((a))
+    #define N_LOG10(a) [&](n_float _v) { return _n_high_log10(_v); }((a))
 #if !defined(NSIMD_AVX512)
-#define N_POW(a,b) _n_dom_pow((a), (b), _n_pow_avx2_ps(a, b))
+#define N_POW(a,b) [&](n_float _va, n_float _vb) { return _n_dom_pow((_va), (_vb), _n_pow_avx2_ps(_va, _vb)); }((a), (b))
 #endif
     #define N_SINCOS(a,s,c) _n_high_sincos(a, s, c)
   #endif
@@ -1819,8 +1819,8 @@ static N_FORCEINLINE void _n_sincos_sse41(__m128 a, __m128* s, __m128* c) {
 #else
   // On NEON, round/trunc have native instructions even in IEEE mode
   #if defined(NSIMD_NEON)
-    #define N_ROUND(a)  vrndaq_f32(a)
-    #define N_TRUNC(a)  vrndq_f32(a)
+    #define N_ROUND(a) [&](n_float _v) { return vrndaq_f32(_v); }((a))
+    #define N_TRUNC(a) [&](n_float _v) { return vrndq_f32(_v); }((a))
   #endif
   // All other math: #ifndef guards below provide per-lane scalar loops
 #endif
@@ -1850,7 +1850,7 @@ static N_FORCEINLINE n_float _n_sin_fallback(n_float a) {
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::sinf(lane[i]);
   return n_load_ps(lane);
 }
-#define N_SIN(a) _n_dom_odd_zero((a), _n_sin_big((a), _n_sin_fallback(a)))
+#define N_SIN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_sin_big((_v), _n_sin_fallback(_v))); }((a))
 #endif
 
 #ifndef N_COS
@@ -1859,7 +1859,7 @@ static N_FORCEINLINE n_float _n_cos_fallback(n_float a) {
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::cosf(lane[i]);
   return n_load_ps(lane);
 }
-#define N_COS(a) _n_cos_big((a), _n_cos_fallback(a))
+#define N_COS(a) [&](n_float _v) { return _n_cos_big((_v), _n_cos_fallback(_v)); }((a))
 #endif
 
 #ifndef N_TAN
@@ -1868,7 +1868,7 @@ static N_FORCEINLINE n_float _n_tan_fallback(n_float a) {
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::tanf(lane[i]);
   return n_load_ps(lane);
 }
-#define N_TAN(a) _n_dom_odd_zero((a), _n_tan_big((a), _n_tan_fallback(a)))
+#define N_TAN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_tan_big((_v), _n_tan_fallback(_v))); }((a))
 #endif
 
 #ifndef N_ASIN
@@ -1877,7 +1877,7 @@ static N_FORCEINLINE n_float _n_asin_fallback(n_float a) {
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::asinf(lane[i]);
   return n_load_ps(lane);
 }
-#define N_ASIN(a) _n_dom_odd_zero((a), _n_dom_asin((a), _n_asin_fallback(a)))
+#define N_ASIN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_dom_asin((_v), _n_asin_fallback(_v))); }((a))
 #endif
 
 #ifndef N_ACOS
@@ -1886,7 +1886,7 @@ static N_FORCEINLINE n_float _n_acos_fallback(n_float a) {
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::acosf(lane[i]);
   return n_load_ps(lane);
 }
-#define N_ACOS(a) _n_dom_acos((a), _n_acos_fallback(a))
+#define N_ACOS(a) [&](n_float _v) { return _n_dom_acos((_v), _n_acos_fallback(_v)); }((a))
 #endif
 
 #ifndef N_ATAN
@@ -1895,7 +1895,7 @@ static N_FORCEINLINE n_float _n_atan_fallback(n_float a) {
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::atanf(lane[i]);
   return n_load_ps(lane);
 }
-#define N_ATAN(a) _n_dom_odd_zero((a), _n_atan_fallback(a))
+#define N_ATAN(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_atan_fallback(_v)); }((a))
 #endif
 
 #ifndef N_ATAN2
@@ -1905,7 +1905,7 @@ static N_FORCEINLINE n_float _n_atan2_fallback(n_float a, n_float b) {
   for (int i = 0; i < NSIMD_WIDTH; i++) la[i] = ::atan2f(la[i], lb[i]);
   return n_load_ps(la);
 }
-#define N_ATAN2(a,b) _n_dom_atan2((a), (b), _n_atan2_fallback(a,b))
+#define N_ATAN2(a,b) [&](n_float _va, n_float _vb) { return _n_dom_atan2((_va), (_vb), _n_atan2_fallback(_va, _vb)); }((a), (b))
 #endif
 
 #ifndef N_SINH
@@ -1914,7 +1914,7 @@ static N_FORCEINLINE n_float _n_sinh_fallback(n_float a) {
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::sinhf(lane[i]);
   return n_load_ps(lane);
 }
-#define N_SINH(a) _n_dom_odd_zero((a), _n_sinh_fallback(a))
+#define N_SINH(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_sinh_fallback(_v)); }((a))
 #endif
 
 #ifndef N_COSH
@@ -1923,7 +1923,7 @@ static N_FORCEINLINE n_float _n_cosh_fallback(n_float a) {
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::coshf(lane[i]);
   return n_load_ps(lane);
 }
-#define N_COSH(a) _n_cosh_fallback(a)
+#define N_COSH(a) [&](n_float _v) { return _n_cosh_fallback(_v); }((a))
 #endif
 
 #ifndef N_TANH
@@ -1932,7 +1932,7 @@ static N_FORCEINLINE n_float _n_tanh_fallback(n_float a) {
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::tanhf(lane[i]);
   return n_load_ps(lane);
 }
-#define N_TANH(a) _n_dom_odd_zero((a), _n_dom_tanh((a), _n_tanh_fallback(a)))
+#define N_TANH(a) [&](n_float _v) { return _n_dom_odd_zero((_v), _n_dom_tanh((_v), _n_tanh_fallback(_v))); }((a))
 #endif
 
 #ifndef N_EXP
@@ -1941,7 +1941,7 @@ static N_FORCEINLINE n_float _n_exp_fallback(n_float a) {
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::expf(lane[i]);
   return n_load_ps(lane);
 }
-#define N_EXP(a) _n_dom_exp((a), _n_exp_fallback(a))
+#define N_EXP(a) [&](n_float _v) { return _n_dom_exp((_v), _n_exp_fallback(_v)); }((a))
 #endif
 
 #ifndef N_LOG
@@ -1950,7 +1950,7 @@ static N_FORCEINLINE n_float _n_log_fallback(n_float a) {
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::logf(lane[i]);
   return n_load_ps(lane);
 }
-#define N_LOG(a) _n_dom_log((a), _n_log_fallback(a))
+#define N_LOG(a) [&](n_float _v) { return _n_dom_log((_v), _n_log_fallback(_v)); }((a))
 #endif
 
 #ifndef N_LOG10
@@ -1959,7 +1959,7 @@ static N_FORCEINLINE n_float _n_log10_fallback(n_float a) {
   for (int i = 0; i < NSIMD_WIDTH; i++) lane[i] = ::log10f(lane[i]);
   return n_load_ps(lane);
 }
-#define N_LOG10(a) _n_log10_fallback(a)
+#define N_LOG10(a) [&](n_float _v) { return _n_log10_fallback(_v); }((a))
 #endif
 
 #ifndef N_POW
@@ -1969,7 +1969,7 @@ static N_FORCEINLINE n_float _n_pow_fallback(n_float a, n_float b) {
   for (int i = 0; i < NSIMD_WIDTH; i++) la[i] = ::powf(la[i], lb[i]);
   return n_load_ps(la);
 }
-#define N_POW(a,b) _n_dom_pow((a), (b), _n_pow_fallback(a,b))
+#define N_POW(a,b) [&](n_float _va, n_float _vb) { return _n_dom_pow((_va), (_vb), _n_pow_fallback(_va, _vb)); }((a), (b))
 #endif
 
 // ================================================================
@@ -2140,7 +2140,7 @@ static N_FORCEINLINE n_float _n_pow_ps(n_float x, n_float y) {
   result = n_blendv_ps(result, n_set1_ps(0.0f),
                        n_and_mask(xZero, n_cmp_gt_ps(y, n_set1_ps(0.0f))));
   result = n_blendv_ps(result, n_set1_ps(NAN),
-                       n_or_mask(n_cmp_ne_ps(x, x), n_cmp_ne_ps(y, y)));
+                       n_or_mask(n_is_nan_ps(x), n_is_nan_ps(y)));
   return result;
 }
 
@@ -2185,7 +2185,7 @@ static N_FORCEINLINE n_double _n_sin_avx2_pd(n_double d) {
     result = _mm256_blendv_pd(result, _mm256_xor_pd(_mm256_castsi256_pd(_mm256_set1_epi64x(0x8000000000000000)), result), _mm256_castps_pd(neg_mask));
     return result;
 }
-#define N_SIN_PD(a) _n_sin_avx2_pd(a)
+#define N_SIN_PD(a) [&](n_float _v) { return _n_sin_avx2_pd(_v); }((a))
 #define N_COS_PD(a) _n_sin_avx2_pd(_mm256_add_pd(a, _mm256_set1_pd(1.5707963267948966)))
 
 #elif defined(NSIMD_AVX512)
@@ -2201,12 +2201,12 @@ static N_FORCEINLINE n_double _n_cos_pd_avx512(n_double a) {
     for (int i = 0; i < w; i++) lane[i] = cos(lane[i]);
     return n_load_pd(lane);
 }
-#define N_SIN_PD(a) _n_sin_pd_avx512(a)
-#define N_COS_PD(a) _n_cos_pd_avx512(a)
+#define N_SIN_PD(a) [&](n_float _v) { return _n_sin_pd_avx512(_v); }((a))
+#define N_COS_PD(a) [&](n_float _v) { return _n_cos_pd_avx512(_v); }((a))
 
 #elif defined(NSIMD_SSE4) && defined(__aarch64__)
 // SSE4: use scalar per-lane for each double lane (only 2-wide anyway, scalar is fine)
-#define N_SIN_PD(a) _n_sin_pd_fallback(a)
+#define N_SIN_PD(a) [&](n_float _v) { return _n_sin_pd_fallback(_v); }((a))
 #else
 // Fallback: per-lane scalar sin/cos
 static N_FORCEINLINE n_double _n_sin_pd_fallback(n_double a) {
@@ -2221,8 +2221,8 @@ static N_FORCEINLINE n_double _n_cos_pd_fallback(n_double a) {
     for (int i = 0; i < w; i++) lane[i] = cos(lane[i]);
     return n_load_pd(lane);
 }
-#define N_SIN_PD(a) _n_sin_pd_fallback(a)
-#define N_COS_PD(a) _n_cos_pd_fallback(a)
+#define N_SIN_PD(a) [&](n_float _v) { return _n_sin_pd_fallback(_v); }((a))
+#define N_COS_PD(a) [&](n_float _v) { return _n_cos_pd_fallback(_v); }((a))
 #endif
 
 #ifndef N_COS_PD
@@ -2232,7 +2232,7 @@ static N_FORCEINLINE n_double _n_cos_pd_fallback(n_double a) {
     for (int i = 0; i < w; i++) lane[i] = cos(lane[i]);
     return n_load_pd(lane);
 }
-#define N_COS_PD(a) _n_cos_pd_fallback(a)
+#define N_COS_PD(a) [&](n_float _v) { return _n_cos_pd_fallback(_v); }((a))
 #endif
 
 // Public API

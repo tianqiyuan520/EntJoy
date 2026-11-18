@@ -674,6 +674,21 @@ static inline n_mask n_cmp_eq_ps(n_float a, n_float b) {
 }
 
 // Float a != b
+// NaN 判定：n_cmp_ne(x, x) 在 x86 上是 ordered 比较，对 NaN 返回 false，
+// 必须单独给出 unordered 版本，各平台一致。
+static inline n_mask n_is_nan_ps(n_float a) {
+#if defined(NSIMD_AVX512)
+    return _mm512_cmp_ps_mask(a, a, _CMP_UNORD_Q);
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return _mm256_cmp_ps(a, a, _CMP_UNORD_Q);
+#elif defined(NSIMD_SSE4)
+    return _mm_cmpunord_ps(a, a);
+#elif defined(NSIMD_NEON)
+    return vmvnq_u32(vceqq_f32(a, a));
+#else
+    return a != a;
+#endif
+}
 static inline n_mask n_cmp_ne_ps(n_float a, n_float b) {
 #if defined(NSIMD_AVX512)
     return _mm512_cmp_ps_mask(a, b, _CMP_NEQ_OS);
