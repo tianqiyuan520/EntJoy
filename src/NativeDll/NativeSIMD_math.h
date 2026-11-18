@@ -1029,10 +1029,10 @@ static N_FORCEINLINE float64x2_t _n_exp2_neon(float64x2_t v) {
 }
 
 static N_FORCEINLINE n_float _n_pow_neon(n_float x, n_float y) {
-  // 指数与尾数在 float 域取出，log2 只对 [1,2) 的尾数展开
+  // 尾数用绝对值取（负底数不能带符号位进 log2），整数指数与奇偶性单独判定
   n_int ki = vreinterpretq_s32_f32(x);
   n_int ei = vsubq_s32(vshrq_n_s32(vandq_s32(ki, vdupq_n_s32(0x7fffffff)), 23), vdupq_n_s32(127));
-  n_float mf = vreinterpretq_f32_s32(vorrq_s32(vandq_s32(ki, vdupq_n_s32(0x807fffff)), vdupq_n_s32(0x3f800000)));
+  n_float mf = vreinterpretq_f32_s32(vorrq_s32(vandq_s32(ki, vdupq_n_s32(0x007fffff)), vdupq_n_s32(0x3f800000)));
 
   float64x2_t elo = vcvtq_f64_s64(vmovl_s32(vget_low_s32(ei)));
   float64x2_t ehi = vcvtq_f64_s64(vmovl_s32(vget_high_s32(ei)));
@@ -1042,21 +1042,22 @@ static N_FORCEINLINE n_float _n_pow_neon(n_float x, n_float y) {
   float64x2_t vhi = vmulq_f64(lhi, vcvt_f64_f32(vget_high_f32(y)));
   n_float mag = vcombine_f32(vcvt_f32_f64(_n_exp2_neon(vlo)), vcvt_f32_f64(_n_exp2_neon(vhi)));
 
-  // 负底数：仅整数指数成立，奇数指数取负；非整数指数为 NaN
+  // 负底数：仅整数指数成立，奇数指数取负；|y| >= 2^23 的 float 必为偶数整数
   n_float ay = vabsq_f32(y);
-  uint32x4_t yInt = vandq_u32(vceqq_f32(y, vrndq_f32(y)), vcltq_f32(ay, vdupq_n_f32(8388608.0f)));
-  n_float half = vrndq_f32(vmulq_f32(y, vdupq_n_f32(0.5f)));
-  uint32x4_t yOdd = vcltq_f32(vsubq_f32(vmulq_f32(half, vdupq_n_f32(2.0f)), y), vdupq_n_f32(0.0f));
-  uint32x4_t negSign = vandq_u32(vcltq_f32(x, vdupq_n_f32(0.0f)), vandq_u32(yInt, yOdd));
-  n_float result = vbslq_f32(negSign, vnegq_f32(mag), mag);
+  uint32x4_t yIsInt = vceqq_f32(y, vrndq_f32(y));
+  uint32x4_t yOdd = vandq_u32(vmvnq_u32(vceqq_f32(vmulq_f32(vrndq_f32(vmulq_f32(y, vdupq_n_f32(0.5f))), vdupq_n_f32(2.0f)), y)),
+                             vcltq_f32(ay, vdupq_n_f32(8388608.0f)));
+  // 负号用符号位判，-0.0 也参与
+  uint32x4_t xSign = vcltq_s32(vreinterpretq_s32_f32(x), vdupq_n_s32(0));
+  n_float signVal = vbslq_f32(xSign, vdupq_n_f32(-1.0f), vdupq_n_f32(1.0f));
+  n_float result = vbslq_f32(vandq_u32(xSign, vandq_u32(yIsInt, yOdd)), vnegq_f32(mag), mag);
 
-  uint32x4_t xNeg = vcltq_f32(x, vdupq_n_f32(0.0f));
-  result = vbslq_f32(vandq_u32(xNeg, vornq_u32(yInt, yInt)), vdupq_n_f32(0.0f / 0.0f), result);
+  result = vbslq_f32(vandq_u32(xSign, vmvnq_u32(yIsInt)), vdupq_n_f32(NAN), result);
   result = vbslq_f32(vceqq_f32(y, vdupq_n_f32(0.0f)), vdupq_n_f32(1.0f), result);
   uint32x4_t xZero = vceqq_f32(x, vdupq_n_f32(0.0f));
-  result = vbslq_f32(vandq_u32(xZero, vcltq_f32(y, vdupq_n_f32(0.0f))), vdupq_n_f32(INFINITY), result);
-  result = vbslq_f32(vandq_u32(xZero, vcgtq_f32(y, vdupq_n_f32(0.0f))), vdupq_n_f32(0.0f), result);
-  return vbslq_f32(vorrq_u32(vmvnq_u32(vceqq_f32(x, x)), vmvnq_u32(vceqq_f32(y, y))), vdupq_n_f32(0.0f / 0.0f), result);
+  result = vbslq_f32(vandq_u32(xZero, vcltq_f32(y, vdupq_n_f32(0.0f))), vmulq_f32(signVal, vdupq_n_f32(INFINITY)), result);
+  result = vbslq_f32(vandq_u32(xZero, vcgtq_f32(y, vdupq_n_f32(0.0f))), vmulq_f32(signVal, vdupq_n_f32(0.0f)), result);
+  return vbslq_f32(vorrq_u32(vmvnq_u32(vceqq_f32(x, x)), vmvnq_u32(vceqq_f32(y, y))), vdupq_n_f32(NAN), result);
 }
 #endif // NSIMD_NEON && __aarch64__
 
