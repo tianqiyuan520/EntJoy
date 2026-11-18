@@ -104,8 +104,8 @@ int main()
         for (float x : xs)
         {
             for (int k = 0; k < NSIMD_WIDTH; k++) in[k] = x;
-            n_float sv, cv;
-            N_SINCOS(n_load_ps(in), &sv, &cv);
+            n_float xv = n_load_ps(in), sv, cv;
+            N_SINCOS(xv, &sv, &cv);
             n_store_ps(sOut, sv);
             n_store_ps(cOut, cv);
             Check("sincos.sin", x, sOut[0], RefSin(x), false);

@@ -1311,6 +1311,11 @@ static N_FORCEINLINE n_float _n_high_acos_neon(n_float x) { return _n_high_split
 static N_FORCEINLINE n_float _n_high_exp_neon(n_float x) { return _n_high_split2(x, _n_exp2d_exp_neon); }
 static N_FORCEINLINE n_float _n_high_log_neon(n_float x) { return _n_high_split2(x, _n_log2d_neon); }
 static N_FORCEINLINE n_float _n_high_log10_neon(n_float x) { return _n_high_split2(x, _n_log10_2d_neon); }
+static N_FORCEINLINE void _n_high_sincos_neon(n_float x, n_float* s, n_float* c) {
+  *s = _n_high_sin_neon(x);
+  *c = _n_high_cos_neon(x);
+}
+
 static N_FORCEINLINE n_float _n_high_sinh_neon(n_float x) { return _n_high_split2(x, _n_sinh2d_neon); }
 static N_FORCEINLINE n_float _n_high_cosh_neon(n_float x) { return _n_high_split2(x, _n_cosh2d_neon); }
 static N_FORCEINLINE n_float _n_high_tanh_neon(n_float x) { return _n_high_split2(x, _n_tanh2d_neon); }
