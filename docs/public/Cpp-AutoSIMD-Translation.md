@@ -230,20 +230,20 @@ AVX512 与 NEON 的数值验证依赖模拟：本机 CPU 不支持 AVX512，也�
 
 float 次正规在 `log` 上先放大 2^24、结果补回 `24·ln2`，Fastest 与 High 两档一致（`log(1.4e-45) = -103.279`）。
 
-`pow` 的边界：整数指数判定不设幅值上限（`|y| ≥ 2^23` 的 float 必为偶数整数，`pow(-2, 2^23) = +inf`）；奇偶性只在 `|y| < 2^23` 上判；负号取符号位而非比较，因此 `pow(-0, 3) = -0`、`pow(-0, -3) = -inf`。NEON 的内联 `pow` 与 AVX2 走同一套判定。
+`pow` 的内核（AVX2 / NEON / libm 回退）只算 `|x|^y`，符号、奇偶、零底数、±inf 与 NaN 全部由 `_n_dom_pow` 判定：整数指数按奇偶给符号，`|y| ≥ 2^23` 视为偶数整数，因此 `pow(-0, 3) = -0`、`pow(-0, -3) = -inf`、`pow(-2, 2^23) = +inf`。
 
 奇函数（`sin`/`tan`/`atan`/`asin`/`sinh`/`tanh`）在 `x = ±0` 时返回输入本身，零的符号得以保留。`sin`/`cos` 的 Cody-Waite 归约在 `|x| > 1e7` 时改为按 lane 调 libm；`tan` 在同一阈值整条走 libm，因为分别回退的 `sin`/`cos` 相除会在极值处得到 `0/0` 或 `inf`（`tan(1e38)` 由此得到正确值）。
 
-宏层的 `N_*` 会把操作数求值两次（一次给内核，一次给定义域判定），因此只接受无副作用的操作数，调用点都传 already-loaded 的向量或字段访问。
+宏层的 `N_*` 用 `[&](n_float _v){ ... }((a))` 接收实参，操作数只求值一次，带副作用的表达式也安全；`domain.cpp` 里用计数用例守住这条。
 
 ### 跨平台数值门禁
 
-两个工具，任一断言失败时进程退出码非零：
+两个工具都跑 Fastest / High / IEEE（逐 lane libm）三档，任一断言失败时进程退出码非零：
 
 | 工具 | 覆盖 | 判定口径 |
 |---|---|---|
 | `tools/MathUlpCheck` | 各函数在连续区间上的 ULP 分布 | `|bits(out) - bits(ref)|`，次正规按 `2^-149` 计的绝对误差；非有限参考值不计入（区间采样里溢出属正常） |
-| `tools/MathUlpCheck/domain.cpp` | 178 项定点用例：`0`/`±0`/负数/`±inf`/NaN/次正规、`pow` 定点、`atan2` 定点、`N_SINCOS`、`N_LOG10` | 按结果类别比对（NaN / `±inf` / `±0` / 有限值），类别不符即失败 |
+| `tools/MathUlpCheck/domain.cpp` | 223 项定点用例：`0`/`±0`/负数/`±inf`/NaN/次正规、`exp` 溢出边界、`pow` 定点、`atan2` 十四象限、`N_SINCOS`、`N_LOG10`，并校验宏参数只求值一次 | 按结果类别比对（NaN / `±inf` / `±0` / 有限值），类别不符即失败 |
 
 `ENTJOY_MATH_ISA` 选择目标指令集。`.github/workflows/native-math.yml` 五个作业：
 
@@ -251,8 +251,10 @@ float 次正规在 `log` 上先放大 2^24、结果补回 `24·ln2`，Fastest �
 |---|---|---|
 | `avx2` | AVX2 | 托管 runner 原生运行，Fastest 与 High 两档的 ULP 与定义域门禁 |
 | `avx512` | AVX512 | 编译门禁严格；数值执行经 Intel SDE，托管 runner 上 SDE 会 SIGSEGV，因此该步只是 best effort（同一产物在本地 Windows SDE 10.13.1 上跑通） |
-| `sse41` | SSE4.1 | `-msse4.1 -mno-avx` 原生运行，两档门禁；数值断言即该平台的高档实现 |
-| `neon` | NEON (aarch64) | `aarch64-linux-gnu-g++` 交叉编译后由 `qemu-aarch64` 运行，两档门禁 |
+| `sse41` | SSE4.1 | `-msse4.1 -mno-avx` 原生运行，Fastest / High / IEEE 三档门禁 |
+| `neon` | NEON (aarch64) | `aarch64-linux-gnu-g++` 交叉编译后由 `qemu-aarch64` 运行，Fastest 与 High 两档门禁（IEEE 档在 avx2/sse41 上验证） |
 | `arm32` | AArch32 | `-mfpu=neon -mfloat-abi=hard` 后由 `qemu-arm` 运行；数学走标量回退，验证回退路径 |
 
-`pow` 在 SSE4.1 与 AArch32 上回退 libm；NEON 的 High 档 `pow` 也回退 libm，Fastest 档是内联实现。
+`pow` 在 SSE4.1 与 AArch32 上回退 libm；NEON 的 High 档 `pow` 也回退 libm，Fastest 档是内联实现。回退实现与内联内核一样只返回 `|x|^y`，符号由 `_n_dom_pow` 补，避免同一结果被处理两次。
+
+发布门禁 `EntJoy Release Gate` 里的 `math-gate` 作业跑同一套 Fastest / High / IEEE 三档门禁，并在最终 `needs` 里，因此改数学会挡住发布。

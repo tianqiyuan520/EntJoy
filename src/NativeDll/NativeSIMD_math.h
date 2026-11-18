@@ -279,8 +279,7 @@ static N_FORCEINLINE __m256 _n_log_avx2(__m256 d) {
   wide = _mm256_add_ps(wide, _mm256_mul_ps(x, p));
 
   __m256 res = _mm256_blendv_ps(wide, near, _mm256_cmp_ps(at, _mm256_set1_ps(0.25f), _CMP_LE_OQ));
-  // 定义域：0 -> -inf，负数 -> NaN，+inf -> +inf
-  // NaN 必须原样透传：NaN 的指数域是 255，按位取尾数会算出 89.1 这样的有限值
+  // 定义域（0 / 负数 / ±inf / NaN）由宏层 _n_dom_log 负责
   return _mm256_sub_ps(res, _mm256_and_ps(sub, _mm256_set1_ps(16.635532333438687f)));
 }
 static N_FORCEINLINE __m256 _n_exp_avx2(__m256 d) {
@@ -595,7 +594,7 @@ static N_FORCEINLINE __m256 _n_high_log(__m256 x) {
 
   __m128 rl = _mm256_cvtpd_ps(lo), rh = _mm256_cvtpd_ps(hi);
   __m256 res = _mm256_insertf128_ps(_mm256_castps128_ps256(rl), rh, 1);
-  // 定义域：0 -> -inf，负数 -> NaN，+inf -> +inf，NaN 透传；次正规补回 24*ln2
+  // 定义域由宏层 _n_dom_log 负责；次正规已在上面放大，这里补回 24*ln2
   __m256 corr = _mm256_and_ps(subM, _mm256_set1_ps(16.635532333438687f));
   return _mm256_sub_ps(res, corr);
 }
@@ -946,9 +945,7 @@ static N_FORCEINLINE n_float _n_log_neon(n_float d) {
   wide = vfmaq_f32(wide, ef, vdupq_n_f32(1.428606765330187045e-6f));
   wide = vfmaq_f32(wide, x, p);
   n_float res = vbslq_f32(vcleq_f32(at, vdupq_n_f32(0.25f)), near, wide);
-  // 定义域：0 -> -inf，负数 -> NaN，+inf -> +inf
-  // NaN 必须原样透传：NaN 的指数域是 255，按位取尾数会算出有限值
-  res = vbslq_f32(vmvnq_u32(vceqq_f32(d, d)), d, res);
+  // 定义域（0 / 负数 / ±inf / NaN）由宏层 _n_dom_log 负责
   return vsubq_f32(res, vbslq_f32(sub, vdupq_n_f32(16.635532333438687f), vdupq_n_f32(0.0f)));
 }
 
@@ -1076,7 +1073,7 @@ static N_FORCEINLINE float64x2_t _n_exp2_neon(float64x2_t v) {
 }
 
 static N_FORCEINLINE n_float _n_pow_neon(n_float x, n_float y) {
-  // 尾数用绝对值取（负底数不能带符号位进 log2），整数指数与奇偶性单独判定
+  // 尾数取绝对值（负底数的符号不进 log2），符号与奇偶由 _n_dom_pow 统一处理
   n_int ki = vreinterpretq_s32_f32(x);
   n_int ei = vsubq_s32(vshrq_n_s32(vandq_s32(ki, vdupq_n_s32(0x7fffffff)), 23), vdupq_n_s32(127));
   n_float mf = vreinterpretq_f32_s32(vorrq_s32(vandq_s32(ki, vdupq_n_s32(0x007fffff)), vdupq_n_s32(0x3f800000)));
@@ -2073,32 +2070,6 @@ static N_FORCEINLINE n_float _n_cosh_ps(n_float a) {
   *c = n_cos_ps(a);
 }
 
-static N_FORCEINLINE n_float _n_pow_ps(n_float x, n_float y) {
-  n_float ax = n_fabs_ps(x);
-  n_float mag = n_exp_ps(n_mul_ps(y, n_log_ps(ax)));
-
-  n_float ay = n_fabs_ps(y);
-  n_mask yInt = n_and_mask(n_cmp_eq_ps(y, n_trunc_ps(y)), n_cmp_lt_ps(ay, n_set1_ps(8388608.0f)));
-  n_float half = n_trunc_ps(n_mul_ps(y, n_set1_ps(0.5f)));
-  n_mask yOdd = n_cmp_ne_ps(n_mul_ps(half, n_set1_ps(2.0f)), y);
-  n_mask negate = n_and_mask(yInt, yOdd);
-
-  n_float sign = n_blendv_ps(n_set1_ps(1.0f), n_set1_ps(-1.0f),
-                             n_and_mask(n_cmp_lt_ps(x, n_set1_ps(0.0f)), negate));
-  n_float result = n_mul_ps(mag, sign);
-
-  result = n_blendv_ps(result, n_set1_ps(NAN),
-                       n_and_mask(n_cmp_lt_ps(x, n_set1_ps(0.0f)), n_not_mask(yInt)));
-  result = n_blendv_ps(result, n_set1_ps(1.0f), n_cmp_eq_ps(y, n_set1_ps(0.0f)));
-  n_mask xZero = n_cmp_eq_ps(x, n_set1_ps(0.0f));
-  result = n_blendv_ps(result, n_set1_ps(INFINITY),
-                       n_and_mask(xZero, n_cmp_lt_ps(y, n_set1_ps(0.0f))));
-  result = n_blendv_ps(result, n_set1_ps(0.0f),
-                       n_and_mask(xZero, n_cmp_gt_ps(y, n_set1_ps(0.0f))));
-  result = n_blendv_ps(result, n_set1_ps(NAN),
-                       n_or_mask(n_is_nan_ps(x), n_is_nan_ps(y)));
-  return result;
-}
 
 // ================================================================
 #endif
