@@ -133,6 +133,21 @@ Flecs 没有逐实体回调 API，`ecs_query_iter` 是块级实现，所以在 Q
 - **131 块对 131 块**：Flecs 22.25 对 EntJoy 13.83（×3）、14.76 对 8.55（×2），EntJoy 快 1.6–1.7 倍。Flecs 多块要连列连续性一起付，这一格是它的上界。
 - 结论 1 与结论 4 的差就是"块数"这一个变量的量级：Flecs 的领先来自 10 万实体一张连续表，不是循环体实现。
 
+### 同块数（1 块）对比
+
+10 万实体下 EntJoy 做不出 1 块（槽位上限 `1<<16`），所以取 65536 实体：EntJoy 容量 65536 恰好 1 块、Flecs 单表 1 块、EnTT 没有分块层。矩阵口径，min / 中位（µs），来源 `results/aligned-cpp-group-summary.csv` 里 `entities=65536` 的行。
+
+| 框架 | 路径 | 块数 | 65536 × 2 | 65536 × 3 |
+| --- | --- | --- | --- | --- |
+| **EntJoy** | `IJobEntity.Run`（容量 65536） | 1 | **4.00 / 4.26** | **6.14 / 6.46** |
+| EntJoy | `IJobChunk.Run`（容量 65536） | 1 | 4.04 / 4.29 | 6.56 / 7.09 |
+| Flecs | `iter-span`（单 table） | 1 | 4.66 / 4.80 | 6.63 / 6.93 |
+| EnTT | `group-each`（owned view） | 无分块层 | 26.57 / 27.27 | 38.47 / 39.44 |
+
+同块数下 EntJoy 与 Flecs 打平：×2 EntJoy 快 11%，×3 的 query 形式快 7%、chunk 形式 Flecs 快 2%。EnTT 慢 6.1–6.4 倍，而它根本没有块：`group.each` 直接遍历每个组件池的一段连续数组（harness 就是 `registry.group<A,B>().each(...)`），所以它那 6 倍差距与块数无关，来自 sparse-set 的池布局与逐实体取址。
+
+一块对三家的含义不同：Flecs 的 1 块是默认形态，EntJoy 的 1 块要调满容量（10 万做不到），EnTT 没有块这一层。
+
 复现：
 
 ```powershell
@@ -144,6 +159,10 @@ Flecs 没有逐实体回调 API，`ecs_query_iter` 是块级实现，所以在 Q
 
 # EntJoy 块容量（矩阵口径，与上面同一 harness）：0=默认，65536=2 块
 ..\bin\Release\net8.0\EcsComparison.exe --traversal-matrix --chunk-capacity=65536
+
+# 同块数（1 块）：档位与容量同时给到 65536
+..\bin\Release\net8.0\EcsComparison.exe --traversal-matrix --chunk-capacity=65536 --matrix-entities=65536
+.\native-comparison-clang-o2.exe --entities=65536 --rounds=2
 
 # EntJoy 块容量（共享探针，只看相对影响）
 ..\bin\Release\net8.0\EcsComparison.exe --ab-pair chunk-job-cpp arch-chunk 7 65536 100000
@@ -177,7 +196,7 @@ C# 组内 EntJoy 的 query 路径领先 Arch 3.8 倍（28.86 对 109.75）；chu
 
 两边的"块"不在同一层，读表前先看这一节。
 
-- Flecs 4.2.0 没有块尺寸参数：table 的列是一整块连续分配（`src/storage/table.c` 的列初始化按 `ecs_column_t` 向量生长，无按字节切块），一次 `ecs_query_next` 交付整张表，`iter.count` 等于表的实体数（`src/iter.c`）；公开 API 只有 `ecs_page_iter`（一个窗口，不会续页）与 `ecs_worker_iter`（把单次结果切区间）。10 万实体落在同一张表就是 1 块。
+- Flecs 4.2.0 没有块尺寸参数，也没有块字节上限：table 的容量按实体数增长，每列一次 `ecs_os_realloc(column->data, column->ti->size * entities.size)`（`src/storage/table.c` 的 `flecs_table_grow_data`），唯一的界是 `ecs_vec_set_size` 里的 `INT32_MAX / 元素大小` 溢出保护（`src/datastructures/vec.c`）。没有 16 KiB / 128 实体这类上限，10 万实体本来就该落在同一张表。一次 `ecs_query_next` 交付整张表，`iter.count` 等于表的实体数（`src/iter.c`）；公开 API 只有 `ecs_page_iter`（一个窗口，不会续页）与 `ecs_worker_iter`（把单次结果切区间）。
 - EntJoy 的块容量由 `Archetype.CalculateOptimalChunkCapacity` 按 16 KiB 预算算出（`Archetype.cs` 第 132–137 行，注释为"Unity 风格的小物理 Chunk"），10 万实测 2 组件 105 块、3 组件 131 块（每块 960 / 768 实体）；Arch 同期实测 1000 / 800 实体一块（100k 时 100 / 125 块），与 EntJoy 同量级。`ChunkCapacityOverride` 可改，上限 `1<<16` 槽位。
 - Unity 的 `query.CalculateChunkCount()` 在 10 万给 782 块（约 128 实体/块），1024 给 8 块。成因是硬上限，不是字节预算：`Chunk.kChunkSize` 是 16 KiB（`Chunk.cs:347`），但 `TypeManager.MaximumChunkCapacity = 128`（`TypeManager.cs:667`）在 `EntityComponentStore.cs:2792` 取 `math.min`，128 永远先命中；`[MaximumChunkCapacity]` 只能往下调。所以 Unity 的块数是 Arch / EntJoy 的 6–7.8 倍，且无法对齐。
 - 每块成本的量级（矩阵口径）：Flecs 1 千档 1 块 0.114 / 0.147 µs（2 / 3 组件）、131 块 2.08 / 2.80 µs，相减得每次交付 ≈ 15–20 ns；10 万档从 1 块到 131 表是 ×2 中位 +94%、×3 +81%，多出来的部分远超 131 × 20 ns ≈ 3 µs，其余是列不再连续后的缺失。EntJoy 131 块 → 2 块是 ×2 中位 −15%、×3 中位持平（min 端 −10%）。
@@ -288,6 +307,7 @@ C# 组遍历（相对该组最快者，10 万，同一会话，1 千档不进排
 
 - **C++ 组**：出厂默认下 Flecs 领先一成（10 万×3 是 12.32 对 13.83，+12%；×2 同为 +12%）。领先的量来自"10 万实体一张连续表"：Flecs 1 块换 131 表要 +81%，EntJoy 131 块降到 2 块能省 15%（×2）。两边各按能到的最少块数比（Flecs 1 块、EntJoy 2 块），×2 是 7.60 对 7.24，EntJoy 快 10%；×3 是 12.32 对 14.52，Flecs 快 18%。强制 131 块对 131 块时反过来，EntJoy 快 1.6–1.7 倍。
 - **1 千档**：不进排序。它量的是固定开销（EntJoy C++ 空 body 与满 body 在 1 千档同为 0.4–0.5 µs），详见"1 千档不进对比"。
+- **同块数**：65536 实体、三家都按 1 块跑，EntJoy 4.26 / 6.46 对 Flecs 4.80 / 6.93（×2 快 11%，×3 快 7%），EnTT 27.27 / 39.44（慢 6.1–6.4 倍且没有分块层）。
 - **C# 组**：EntJoy 的 query 路径（28.86）领先 Arch 3.8 倍；chunk 形式 Arch 26.75 与 EntJoy 27.76 差 3.8%，块数也差 5%。这些读数来自 tiering 关闭的会话，换 JIT 配置会动（见"测量协议"）。
 - **同框架跨语言**：EntJoy 的 C++ 转译路径比自家托管 chunk 路径快 3.3 倍（10 万×2：8.55 对 27.95，同一进程的两侧）。
 - **结构变更**：C++ 组 EnTT 拿创建、添加、移除，Flecs 拿销毁；C# 组 EntJoy 四项全拿（0.83–0.94 相对 Arch），Unity 是 2.2–6.7 倍。

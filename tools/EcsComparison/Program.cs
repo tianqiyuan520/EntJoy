@@ -35,11 +35,13 @@ else if (args.Length > 0 && args[0] == "--matched-query")
     QueryMatchedComparison.Run();
 else if (args.Length > 0 && args[0] == "--traversal-matrix")
 {
-    // 矩阵路径每个臂新建世界，与 --ab-pair 的共享探针读数不同；块容量要在这条路径上也能改，
+    // 矩阵路径每个臂新建世界，与 --ab-pair 的共享探针读数不同；块容量与档位要在这条路径上也能改，
     // 否则块数对齐只能在 --ab-pair 里做，两种口径的读数不能互比。
     foreach (string arg in args)
         if (arg.StartsWith("--chunk-capacity=", StringComparison.Ordinal))
             EntJoy.ECS.Archetype.ChunkCapacityOverride = int.Parse(arg.Substring("--chunk-capacity=".Length));
+        else if (arg.StartsWith("--matrix-entities=", StringComparison.Ordinal))
+            TraversalMatrix.EntityCountsOverride = new[] { int.Parse(arg.Substring("--matrix-entities=".Length)) };
     TraversalMatrix.Run(false);
 }
 else if (args.Length > 0 && args[0] == "--query-matrix")
