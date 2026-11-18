@@ -16,8 +16,15 @@ namespace
     static int BenchN()
     {
         const char* v = std::getenv("ENTJOY_BENCH_N");
-        int n = v ? std::atoi(v) : (1 << 20);
-        if (n <= 0) n = 1 << 20;
+        if (!v) return 1 << 20;
+        char* end = nullptr;
+        long n = std::strtol(v, &end, 10);
+        if (end == v || *end != 0 || n <= 0)
+        {
+        std::fprintf(stderr, "ENTJOY_BENCH_N must be a positive integer\n");
+            std::exit(2);
+        }
+        return (int)n;
         return ((n + NSIMD_WIDTH - 1) / NSIMD_WIDTH) * NSIMD_WIDTH;
     }
     static const int N = BenchN();

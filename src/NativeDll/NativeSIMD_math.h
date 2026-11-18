@@ -435,8 +435,10 @@ static N_FORCEINLINE __m256d _n_atan2_4_pd(__m256d y, __m256d x) {
   __m256d r = _n_atan4_pd(_mm256_div_pd(y, x));
   __m256d adj = _mm256_blendv_pd(_mm256_sub_pd(zero, pi), pi, _mm256_cmp_pd(y, zero, _CMP_GE_OQ));
   r = _mm256_blendv_pd(r, _mm256_add_pd(r, adj), _mm256_cmp_pd(x, zero, _CMP_LT_OQ));
-  return _mm256_blendv_pd(r, zero, _mm256_and_pd(_mm256_cmp_pd(x, zero, _CMP_EQ_OQ),
-                                                 _mm256_cmp_pd(y, zero, _CMP_EQ_OQ)));
+  // y = ±0 且 x > 0 时结果为 ±0
+  __m256d yZeroPos = _mm256_and_pd(_mm256_cmp_pd(y, zero, _CMP_EQ_OQ), _mm256_cmp_pd(x, zero, _CMP_GT_OQ));
+  r = _mm256_blendv_pd(r, _mm256_and_pd(y, _mm256_set1_pd(-0.0)), yZeroPos);
+  return _mm256_blendv_pd(r, zero, _mm256_and_pd(_mm256_cmp_pd(x, zero, _CMP_EQ_OQ), _mm256_cmp_pd(y, zero, _CMP_EQ_OQ)));
 }
 
 static N_FORCEINLINE __m256d _n_exp4_pd(__m256d x) {
@@ -1271,9 +1273,6 @@ static N_FORCEINLINE float64x2_t _n_tanh2d_neon(float64x2_t x) {
   return vdivq_f64(vsubq_f64(e2, vdupq_n_f64(1.0)), vaddq_f64(e2, vdupq_n_f64(1.0)));
 }
 
-static N_FORCEINLINE float64x2_t _n_pow2d_neon(float64x2_t x, float64x2_t y) {
-  return _n_exp2d_neon(vmulq_f64(_n_log2d_base2_neon(x), y));
-}
 
 static N_FORCEINLINE float64x2_t _n_log10_2d_neon(float64x2_t x) {
   return vmulq_f64(_n_log2d_neon(x), vdupq_n_f64(0.4342944819032518));
@@ -1292,12 +1291,6 @@ static N_FORCEINLINE n_float _n_high_sinh_neon(n_float x) { return _n_high_split
 static N_FORCEINLINE n_float _n_high_cosh_neon(n_float x) { return _n_high_split2(x, _n_cosh2d_neon); }
 static N_FORCEINLINE n_float _n_high_tanh_neon(n_float x) { return _n_high_split2(x, _n_tanh2d_neon); }
 static N_FORCEINLINE n_float _n_high_atan2_neon(n_float y, n_float x) { return _n_high_binary2(y, x, _n_atan2_2_neon); }
-static N_FORCEINLINE n_float _n_high_pow_neon(n_float x, n_float y) { return _n_high_binary2(x, y, _n_pow2d_neon); }
-
-static N_FORCEINLINE void _n_high_sincos_neon(n_float a, n_float* s, n_float* c) {
-  *s = _n_high_sin_neon(a);
-  *c = _n_high_cos_neon(a);
-}
 
 #endif // NSIMD_NEON && __aarch64__
 
@@ -1523,6 +1516,9 @@ static N_FORCEINLINE __m128 _n_atan2_sse41(__m128 y, __m128 x) {
   __m128 r = _n_atan_sse41(_mm_div_ps(y, x));
   __m128 adj = _n_blend_sse41(_mm_sub_ps(zero, pi), pi, _mm_cmpge_ps(y, zero));
   r = _n_blend_sse41(r, _mm_add_ps(r, adj), _mm_cmplt_ps(x, zero));
+  // y = ±0 且 x > 0 时结果为 ±0
+  __m128 yZeroPos = _mm_and_ps(_mm_cmpeq_ps(y, zero), _mm_cmpgt_ps(x, zero));
+  r = _n_blend_sse41(r, _mm_and_ps(y, _mm_set1_ps(-0.0f)), yZeroPos);
   __m128 bothZero = _mm_and_ps(_mm_cmpeq_ps(x, zero), _mm_cmpeq_ps(y, zero));
   return _n_blend_sse41(r, zero, bothZero);
 }
@@ -2013,6 +2009,8 @@ static N_FORCEINLINE n_float _n_acos_ps(n_float a) {
   q = n_fmadd_ps(q, z, n_set1_ps(-3.333315467e-01f));
   n_float r = n_fmadd_ps(n_mul_ps(t, z), q, t);
   r = n_blendv_ps(r, n_sub_ps(pi_2, r), big);
+  // atan(-0) = -0：结果与输入同号
+  r = n_blendv_ps(r, _mm256_and_ps(a, n_set1_ps(-0.0f)), n_cmp_eq_ps(a, n_set1_ps(0.0f)));
   return n_blendv_ps(n_sub_ps(n_set1_ps(0.0f), r), r, n_cmp_gt_ps(a, n_set1_ps(0.0f)));
 }
 static N_FORCEINLINE n_float _n_sinh_ps(n_float a) {

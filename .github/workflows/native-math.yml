@@ -28,6 +28,10 @@ jobs:
       - name: ULP gate (High)
         run: ./build-avx2/MathUlpCheckHigh
 
+      - name: Domain gate (Fastest)
+        run: ./build-avx2/MathDomainCheck
+      - name: Domain gate (High)
+        run: ./build-avx2/MathDomainCheckHigh
   # AVX512 指令用 Intel SDE 模拟：托管 runner 的 CPU 不一定有 AVX512
   avx512:
     runs-on: ubuntu-latest
@@ -76,6 +80,10 @@ jobs:
       - name: ULP gate (High, SSE4.1)
         run: ./build-sse41/MathUlpCheckHigh
 
+      - name: Domain gate (Fastest, SSE4.1)
+        run: ./build-sse41/MathDomainCheck
+      - name: Domain gate (High, SSE4.1)
+        run: ./build-sse41/MathDomainCheckHigh
   # AArch32：无 aarch64 指令，数学走标量回退；此作业验证回退路径能编译并通过门禁。
   arm32:
     runs-on: ubuntu-latest
@@ -95,6 +103,8 @@ jobs:
         run: cmake --build build-arm32 -j
       - name: ULP gate (Fastest, emulated armv7)
         run: qemu-arm -L /usr/arm-linux-gnueabihf ./build-arm32/MathUlpCheck
+      - name: Domain gate (Fastest, emulated armv7)
+        run: qemu-arm -L /usr/arm-linux-gnueabihf ./build-arm32/MathDomainCheck
 
   neon:
     runs-on: ubuntu-latest
@@ -116,6 +126,10 @@ jobs:
         run: qemu-aarch64 -L /usr/aarch64-linux-gnu ./build-neon/MathUlpCheck
       - name: ULP gate (High, emulated aarch64)
         run: qemu-aarch64 -L /usr/aarch64-linux-gnu ./build-neon/MathUlpCheckHigh
+      - name: Domain gate (Fastest, emulated aarch64)
+        run: qemu-aarch64 -L /usr/aarch64-linux-gnu ./build-neon/MathDomainCheck
+      - name: Domain gate (High, emulated aarch64)
+        run: qemu-aarch64 -L /usr/aarch64-linux-gnu ./build-neon/MathDomainCheckHigh
       # qemu 的绝对时间无意义，这里只取同一进程内 内联/SIMD 与逐 lane libm 的比值
       - name: Bench (relative, emulated aarch64)
         run: ENTJOY_BENCH_N=16384 qemu-aarch64 -L /usr/aarch64-linux-gnu ./build-neon/MathExpBench
