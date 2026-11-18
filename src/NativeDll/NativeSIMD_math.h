@@ -242,7 +242,7 @@ static N_FORCEINLINE __m256 _n_exp_avx2(__m256 d) {
   p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0f / 6.0f));
   p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(0.5f));
   p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0f));
-  p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0f));                                // exp(r) 闁?1 + r*(1 + r*(闁?)
+  p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0f));
 
   __m256i ni = _mm256_cvtps_epi32(_mm256_max_ps(_mm256_min_ps(n, _mm256_set1_ps(127.0f)),
                                                _mm256_set1_ps(-252.0f)));
@@ -443,7 +443,7 @@ static N_FORCEINLINE __m256d _n_cos4_pd(__m256d x) {
   q = _mm256_fmadd_pd(q, z, _mm256_set1_pd(0.19999999262220255));
   q = _mm256_fmadd_pd(q, z, _mm256_set1_pd(-0.33333333329431702));
   __m256d r = _mm256_fmadd_pd(_mm256_mul_pd(u, z), q, u);
-  r = _mm256_add_pd(r, _mm256_and_pd(mid, pi_4));                       // 濞戞搩鍙冨Λ鍧楀礌濞差亝锛熼悶?pi/4
+  r = _mm256_add_pd(r, _mm256_and_pd(mid, pi_4));
   r = _mm256_blendv_pd(r, _mm256_sub_pd(pi_2, r), big);                 // |x|>1: pi/2 - atan(1/x)
   return _mm256_blendv_pd(_mm256_sub_pd(_mm256_set1_pd(0.0), r), r,
                           _mm256_cmp_pd(x, _mm256_set1_pd(0.0), _CMP_GT_OQ));
@@ -529,7 +529,7 @@ static N_FORCEINLINE __m256 _n_high_tanh(__m256 x) { return _n_high_map(x, _n_ta
 static N_FORCEINLINE __m256 _n_high_exp(__m256 x)  { return _n_high_map(x, _n_exp4_pd); }
 
 static N_FORCEINLINE __m256 _n_high_log(__m256 x) {
-  // 鏉?1 濞堥潧宕熼悪顒冭泲 log1p閿涙碍瀵氶弫?鐏忕偓鏆熼幏鍏煎复閸?x閳? 婢跺嫪绱伴張澶屼绩闂呯偓鈧呮祲濞?
+  // log1p：|t| <= 0.25 时走级数，t = x - 1
   __m256d xd_lo = _mm256_cvtps_pd(_mm256_castps256_ps128(x));
   __m256d xd_hi = _mm256_cvtps_pd(_mm256_extractf128_ps(x, 1));
   __m256d tlo = _mm256_sub_pd(xd_lo, _mm256_set1_pd(1.0));
@@ -1982,7 +1982,7 @@ static N_FORCEINLINE n_float _n_pow_fallback(n_float a, n_float b) {
   #define EJ_POWF(a,b)  _n_lane0_f(n_pow_ps(n_set1_ps(a), n_set1_ps(b)))
 #endif
 // ================================================================
-#if defined(NSIMD_AVX2) && !defined(NSIMD_AVX512)   // 缂備礁瀚幃搴ｂ偓鍦仧楠炲洭鎮?mask 闁?blend闁挎稑鐡慥X512 闁?mask 缂侇偉顕ч悗閿嬬▔瀹ュ懎鎮戦悗?
+#if defined(NSIMD_AVX2) && !defined(NSIMD_AVX512)
 // ================================================================
 
 static N_FORCEINLINE n_float _n_tan_ps(n_float a) {
@@ -2095,7 +2095,7 @@ static N_FORCEINLINE n_float _n_pow_ps(n_float x, n_float y) {
 }
 
 // ================================================================
-#endif // 缂備礁瀚幃搴ｂ偓鍦仧楠炲洭鏁嶉崷鎻2 only闁?
+#endif
 // Double-precision SLEEF (n_*_pd)
 // ================================================================
 
