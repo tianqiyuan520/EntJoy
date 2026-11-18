@@ -1685,46 +1685,7 @@ static inline n_mask n_cmp_lt_pd(n_double a, n_double b) {
 #endif
 }
 
-static inline n_mask n_cmp_gt_pd(n_double a, n_double b) {
-#if defined(NSIMD_AVX512)
-    return _mm512_cmp_pd_mask(a, b, _CMP_GT_OS);
-#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
-    return _mm256_castpd_ps(_mm256_cmp_pd(a, b, _CMP_GT_OS));
-#elif defined(NSIMD_SSE4)
-    return _mm_castpd_ps(_mm_cmpgt_pd(a, b));
-#elif defined(NSIMD_NEON)
-    return vreinterpretq_u32_u64(vcgtq_f64(a, b));
-#else
-    return a > b;
-#endif
-}
 
-static inline n_mask n_cmp_ne_pd(n_double a, n_double b) {
-#if defined(NSIMD_AVX512)
-    return _mm512_cmp_pd_mask(a, b, _CMP_NEQ_UQ);
-#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
-    return _mm256_castpd_ps(_mm256_cmp_pd(a, b, _CMP_NEQ_UQ));
-#elif defined(NSIMD_SSE4)
-    return _mm_castpd_ps(_mm_cmpneq_pd(a, b));
-#elif defined(NSIMD_NEON)
-    return vmvnq_u32(vreinterpretq_u32_u64(vceqq_f64(a, b)));
-#else
-    return a != b;
-#endif
-}
-static inline n_double n_fabs_pd(n_double a) {
-#if defined(NSIMD_AVX512)
-    return _mm512_abs_pd(a);
-#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
-    return _mm256_andnot_pd(_mm256_set1_pd(-0.0), a);
-#elif defined(NSIMD_SSE4)
-    return _mm_andnot_pd(_mm_set1_pd(-0.0), a);
-#elif defined(NSIMD_NEON)
-    return vabsq_f64(a);
-#else
-    return a < 0 ? -a : a;
-#endif
-}
 
 static inline n_double n_neg_pd(n_double a) {
 #if defined(NSIMD_AVX512)

@@ -210,17 +210,44 @@ SSE4.1 的 High 档用 float 域实现（精度 1–3 ULP，不追求 ~1 ULP）�
 2 条 double lane 版本在本机测得 0.32–0.79x（比 libm 慢），因此不采用。
 float 域版本实测 1.02–2.11x（exp 1.81x / atan 2.11x / tanh 2.03x / tan 1.02x）。
 
-AVX512 与 NEON 这两条线的实现没有运行验证的硬件条件：本机 CPU 不支持 AVX512，也没有 ARM 设备。NEON 目标可以用 clang 交叉编译做语法与类型检查，AVX512 同理。
+AVX512 与 NEON 的数值验证依赖模拟：本机 CPU 不支持 AVX512，也没有 ARM 设备。AVX512 在本地 Windows SDE 10.13.1 下跑通全部数学门禁；NEON 由 CI 用 `qemu-aarch64` 运行。两者都另有交叉编译的类型检查。
+
+### 定义域与特殊值
+
+定义域不逐函数手写，统一收敛到 `src/NativeDll/NativeSIMD_math.h` 顶部的一组策略函数，各平台的 `N_EXP` / `N_LOG` / `N_TANH` / `N_ATAN2` 宏在调用内核后再套一层：
+
+| 函数 | 规则 |
+|---|---|
+| `_n_dom_exp` / `_n_dom_exp_pd` | `+inf → +inf`，`-inf → 0`，NaN 透传 |
+| `_n_dom_log` / `_n_dom_log_pd` | `0 → -inf`，负数 → NaN，`+inf → +inf`，NaN 透传 |
+| `_n_dom_tanh` | `|x| > 20` → 带符号的 1，NaN 透传 |
+| `_n_dom_atan2` / `_n_dom_atan2_pd` | `y = ±0 且 x > 0` → `y` 的带符号零 |
+
+新增内核只要走宏就自动获得这些行为，不会出现某个精度档漏一处。
+
+float 次正规在 `log` 上先放大 2^24、结果补回 `24·ln2`，Fastest 与 High 两档一致（`log(1.4e-45) = -103.279`）。
+
+`pow` 的边界：整数指数判定不设幅值上限（`|y| ≥ 2^23` 的 float 必为偶数整数，`pow(-2, 2^23) = +inf`）；奇偶性只在 `|y| < 2^23` 上判；负号取符号位而非比较，因此 `pow(-0, 3) = -0`、`pow(-0, -3) = -inf`。NEON 的内联 `pow` 与 AVX2 走同一套判定。
+
+三角内核把 `-0` 归一成 `+0`（`sin`/`tan`/`atan` 与由它们派生的路径），这是已知偏差；`atan2` 保留符号。`|x| > 1e30` 的 `tan` 需要 Payne-Hanek 级归约，不在这套实现的能力范围内。
+
 ### 跨平台数值门禁
 
-`tools/MathUlpCheck` 带阈值断言：任一函数超出上限时进程退出码非零。`ENTJOY_MATH_ISA` 选择目标指令集。
+两个工具，任一断言失败时进程退出码非零：
 
-`.github/workflows/native-math.yml` 三个作业：
+| 工具 | 覆盖 | 判定口径 |
+|---|---|---|
+| `tools/MathUlpCheck` | 各函数在连续区间上的 ULP 分布 | `|bits(out) - bits(ref)|`，次正规按 `2^-149` 计的绝对误差；非有限参考值不计入（区间采样里溢出属正常） |
+| `tools/MathUlpCheck/domain.cpp` | 157 项定点用例：`0`/`±0`/负数/`±inf`/NaN/次正规、`pow` 定点、`atan2` 定点、`N_SINCOS`、`N_LOG10` | 按结果类别比对（NaN / `±inf` / `±0` / 有限值），类别不符即失败 |
+
+`ENTJOY_MATH_ISA` 选择目标指令集。`.github/workflows/native-math.yml` 五个作业：
 
 | 作业 | 指令集 | 运行方式 |
 |---|---|---|
-| `avx2` | AVX2 | 托管 runner 原生运行，Fastest 与 High 两档都过门禁 |
-| `avx512` | AVX512 | 编译门禁严格；数值执行经 Intel SDE，托管 runner 上 SDE 会 SIGSEGV，因此该步 best effort（同一产物在本地 Windows SDE 10.13.1 上跑通） |
-| `neon` | NEON | `aarch64-linux-gnu-g++` 交叉编译后由 `qemu-aarch64` 运行 |
+| `avx2` | AVX2 | 托管 runner 原生运行，Fastest 与 High 两档的 ULP 与定义域门禁 |
+| `avx512` | AVX512 | 编译门禁严格；数值执行经 Intel SDE，托管 runner 上 SDE 会 SIGSEGV，因此该步只是 best effort（同一产物在本地 Windows SDE 10.13.1 上跑通） |
+| `sse41` | SSE4.1 | `-msse4.1 -mno-avx` 原生运行，两档门禁；数值断言即该平台的高档实现 |
+| `neon` | NEON (aarch64) | `aarch64-linux-gnu-g++` 交叉编译后由 `qemu-aarch64` 运行，两档门禁 |
+| `arm32` | AArch32 | `-mfpu=neon -mfloat-abi=hard` 后由 `qemu-arm` 运行；数学走标量回退，验证回退路径 |
 
-NEON 目前没有内联实现，数学走 libm 回退，该作业验证的是交叉编译链路与回退路径的精确性。
+`pow` 在 SSE4.1 与 AArch32 上回退 libm；NEON 的 High 档 `pow` 也回退 libm，Fastest 档是内联实现。

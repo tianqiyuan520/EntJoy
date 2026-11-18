@@ -13,7 +13,6 @@
     #define N_FORCEINLINE inline
 #endif
 
-
 // ================================================================
 // 定义域策略（通解）：所有内核返回前统一调用，避免每个 ISA / 精度档各写一份 blend。
 //   exp  : +inf -> +inf，-inf -> 0，NaN 透传
@@ -46,24 +45,6 @@ static N_FORCEINLINE n_float _n_dom_atan2(n_float y, n_float x, n_float r) {
   return n_blendv_ps(r, sz, cond);
 }
 
-static N_FORCEINLINE n_double _n_dom_exp_pd(n_double x, n_double r) {
-  r = n_blend_pd(r, n_set1_pd(INFINITY), n_cmp_eq_pd(x, n_set1_pd(INFINITY)));
-  r = n_blend_pd(r, n_set1_pd(0.0), n_cmp_eq_pd(x, n_set1_pd(-INFINITY)));
-  return n_blend_pd(r, x, n_cmp_ne_pd(x, x));
-}
-
-static N_FORCEINLINE n_double _n_dom_log_pd(n_double x, n_double r) {
-  r = n_blend_pd(r, n_set1_pd(-INFINITY), n_cmp_eq_pd(x, n_set1_pd(0.0)));
-  r = n_blend_pd(r, n_set1_pd(NAN), n_cmp_gt_pd(n_set1_pd(0.0), x));
-  r = n_blend_pd(r, n_set1_pd(INFINITY), n_cmp_eq_pd(x, n_set1_pd(INFINITY)));
-  return n_blend_pd(r, x, n_cmp_ne_pd(x, x));
-}
-
-static N_FORCEINLINE n_double _n_dom_atan2_pd(n_double y, n_double x, n_double r) {
-  n_double sz = n_mul_pd(y, n_set1_pd(0.0));
-  n_mask cond = n_and_mask(n_cmp_eq_pd(y, n_set1_pd(0.0)), n_cmp_gt_pd(x, n_set1_pd(0.0)));
-  return n_blend_pd(r, sz, cond);
-}
 
 // ================================================================
 // Inline AVX2 polynomial implementations (SLEEF coefficients, zero call overhead)
@@ -83,7 +64,6 @@ static N_FORCEINLINE __m256 _n256_lt(__m256 a, __m256 b) { return _mm256_cmp_ps(
 static N_FORCEINLINE __m256 _n256_gt(__m256 a, __m256 b) { return _mm256_cmp_ps(a, b, _CMP_GT_OQ); }
 static N_FORCEINLINE __m256 _n256_ne(__m256 a, __m256 b) { return _mm256_cmp_ps(a, b, _CMP_NEQ_UQ); }
 static N_FORCEINLINE __m256 _n256_not(__m256 m) { return _mm256_xor_ps(m, _mm256_castsi256_ps(_mm256_set1_epi32(-1))); }
-
 
 static N_FORCEINLINE __m256 _n_reduce_pio2_avx2(__m256 d, __m256i* qOut) {
   __m256d lo = _mm256_cvtps_pd(_mm256_castps256_ps128(d));
@@ -276,7 +256,6 @@ static N_FORCEINLINE __m256d _n_log2_mant_pd(__m256d m) {
 static N_FORCEINLINE __m256d _n_log_mant_pd(__m256d m) {
   return _mm256_mul_pd(_n_log2_mant_pd(m), _mm256_set1_pd(0.69314718055994530942));
 }
-
 
 static N_FORCEINLINE __m256d _n_log1p_series_pd(__m256d t) {
   __m256d s = _mm256_set1_pd(1.0 / 13.0);
@@ -760,7 +739,6 @@ static N_FORCEINLINE void _n_sincos_avx512(n_float a, n_float* s, n_float* c) {
 }
 
 #endif // NSIMD_AVX512
-
 
 // ================================================================
 // provide per-lane scalar fallbacks when no SIMD path is defined.
@@ -1301,7 +1279,6 @@ static N_FORCEINLINE float64x2_t _n_tanh2d_neon(float64x2_t x) {
   float64x2_t e2 = _n_exp2d_exp_neon(vmulq_f64(vdupq_n_f64(2.0), xc));
   return vdivq_f64(vsubq_f64(e2, vdupq_n_f64(1.0)), vaddq_f64(e2, vdupq_n_f64(1.0)));
 }
-
 
 static N_FORCEINLINE float64x2_t _n_log10_2d_neon(float64x2_t x) {
   return vmulq_f64(_n_log2d_neon(x), vdupq_n_f64(0.4342944819032518));
