@@ -38,6 +38,7 @@ namespace NativeTranspiler.Analyzer
         private readonly List<INamedTypeSymbol> _requiredComponentTypes;
         private readonly List<INamedTypeSymbol> _requiredSharedTypes;  // SharedComponent 类型（blittable，per-chunk 值指针）
         private readonly HashSet<string> _chunkArrayLocalNames = new();
+        private readonly bool _emitAlignmentHints;
         private bool _hasCountSnapshot;
         /// <summary>局部数组名 → 存储身份（见 <see cref="NativeArrayElementAlias.StorageKey"/>）。</summary>
         private readonly Dictionary<string, string> _chunkArrayStorageKeys = new();
@@ -53,11 +54,12 @@ namespace NativeTranspiler.Analyzer
         /// <summary>托管事件类型错误（编译时报错）。</summary>
         public List<(INamedTypeSymbol eventType, InvocationExpressionSyntax invocation)> ManagedEventErrors { get; } = new();
 
-        public CppChunkStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct, List<INamedTypeSymbol> requiredComponentTypes, List<INamedTypeSymbol>? requiredSharedTypes = null, bool useFastMath = false, bool enableAutoSIMD = false)
+        public CppChunkStatementTranslator(SemanticModel semanticModel, INamedTypeSymbol jobStruct, List<INamedTypeSymbol> requiredComponentTypes, List<INamedTypeSymbol>? requiredSharedTypes = null, bool useFastMath = false, bool enableAutoSIMD = false, bool emitAlignmentHints = false)
             : base(semanticModel, jobStruct, useFastMath, enableAutoSIMD)
         {
             _requiredComponentTypes = requiredComponentTypes;
             _requiredSharedTypes = requiredSharedTypes ?? new List<INamedTypeSymbol>();
+            _emitAlignmentHints = emitAlignmentHints;
         }
 
         protected override void TranslateBlock(BlockSyntax block, bool skipOuterBraces)
@@ -125,9 +127,11 @@ namespace NativeTranspiler.Analyzer
             var componentType = methodSymbol.TypeArguments[0];
             int requiredIndex = _requiredComponentTypes.FindIndex(t => SymbolEqualityComparer.Default.Equals(t, componentType));
             if (requiredIndex < 0)
-                throw new InvalidOperationException(
-                    $"GetEnableBitMapPtr<{componentType.ToDisplayString()}> 的类型不在 required 组件列表中。" +
-                    "原生 job 内必须同时用 GetComponentDataNativeArray<T>() 访问该组件列，required 序号才能对齐。");
+            {
+                // 用户写法问题（没有同时读该组件列 ⇒ required 序号对不上）：发标记而不是抛异常。
+                expression = $"/*{UnsupportedMarkers.Expr}EnableBitMapTypeNotRequired*/ 0";
+                return true;
+            }
 
             expression = $"reinterpret_cast<unsigned long long*>(__chunkData->requiredEnableBitMaps[{requiredIndex}])";
             return true;
@@ -212,6 +216,12 @@ namespace NativeTranspiler.Analyzer
                 lines.Append("*>(");
                 lines.Append(expression);
                 lines.AppendLine(");");
+
+                if (_emitAlignmentHints)
+                {
+                    lines.Append(new string(' ', _indentLevel * 4));
+                    lines.Append("(void)((intptr_t)").Append(variable.Identifier.Text).AppendLine("_ptr % 64 == 0);");
+                }
 
                 lines.Append(new string(' ', _indentLevel * 4));
                 lines.Append("int ");
@@ -924,16 +934,8 @@ namespace NativeTranspiler.Analyzer
             string tempVar = $"__evt_{eventType.Name}_{typeIndex}";
 
             _builder.AppendLine("{");
-            if (false) // EnableSendEventDiag
-            {
-                _builder.AppendLine($"    fprintf(stderr, \"[SendEvent-CPP] header=%p evtHeaders=%p count=%d\\n\", (void*)__header, __header ? __header->eventBufferHeaders : 0, __header ? __header->eventBufferCount : 0);");
-            }
             _builder.AppendLine($"    if (__header != nullptr && __header->eventBufferHeaders != nullptr) {{");
             _builder.AppendLine($"    auto* {tempVar}_buf = ((__EntJoyEventBuffer**)__header->eventBufferHeaders)[{typeIndex}];");
-            if (false) // EnableSendEventDiag
-            {
-                _builder.AppendLine($"    fprintf(stderr, \"[SendEvent-CPP2] buf=%p data=%p countPtr=%p capacity=%d\\n\", (void*){tempVar}_buf, {tempVar}_buf ? {tempVar}_buf->data : 0, {tempVar}_buf ? (void*){tempVar}_buf->count : 0, {tempVar}_buf ? {tempVar}_buf->capacity : 0);");
-            }
             _builder.AppendLine($"    if ({tempVar}_buf != nullptr) {{");
             _builder.AppendLine($"    int {tempVar}_idx = INTERLOCKED_ADD_AND_FETCH32({tempVar}_buf->count, 1) - 1;");
             _builder.AppendLine($"    if ({tempVar}_idx < {tempVar}_buf->capacity) {{");

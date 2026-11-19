@@ -347,15 +347,17 @@ namespace EntJoy.ECS.SourceGenerator
                 sb.AppendLine("        }");
                 sb.AppendLine("    }");
                 sb.AppendLine();
-            // 逐实体循环独立成非内联方法，递减迭代；内联展开会让热路径变慢，改动前需重测。
+            // 逐实体循环独立成非内联方法；AggressiveOptimization 让它第一帧就以优化码运行，
+            // 否则分层编译的 tier-0 会覆盖整个测量窗口。
                 var bodyParams = new List<string> { $"ref {jobFullName} __job" };
                 bodyParams.AddRange(baseParams);
                 if (entityParams.Count != 0) bodyParams.Add("ref Entity __ejEntityBase");
                 bodyParams.Add("int __count");
-                sb.AppendLine("    [MethodImpl(MethodImplOptions.NoInlining)]");
+                sb.AppendLine("    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]");
                 sb.AppendLine($"    private static void __EntJoyBody({string.Join(", ", bodyParams)})");
                 sb.AppendLine("    {");
-                sb.AppendLine("        for (int __idx = __count - 1; __idx >= 0; __idx--)");
+                // 正序推进：倒序遍历会关掉硬件预取，流式写回变成逐行回读。
+                sb.AppendLine("        for (int __idx = 0; __idx < __count; __idx++)");
                 sb.AppendLine("        {");
                 if (!string.IsNullOrEmpty(methodBody))
                     sb.Append(methodBody);

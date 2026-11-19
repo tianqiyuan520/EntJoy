@@ -44,23 +44,6 @@ public struct Filtered : IJobChunk {
         }
 
         [Fact]
-        public void CompilerVectorize_PreservesExplicitBitTests()
-        {
-            var emitted = Chunk("Cpp", "mask.Length != 0 && (mask.Bits[i >> 6] & (1UL << (i & 63))) == 0", "Vectorize");
-            Assert.DoesNotContain(emitted.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
-            Assert.DoesNotContain("__ENTJOY_UNSUPPORTED", emitted.Cpp);
-            Assert.Contains("__queryMask.Bits[", emitted.Cpp);
-        }
-
-        [Fact]
-        public void CompilerVectorize_SupportsTheMaskIndexIntrinsic()
-        {
-            var emitted = Chunk("Cpp", "mask.Length != 0 && !mask.IsEnabled(i)", "Vectorize");
-            Assert.DoesNotContain(emitted.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
-            Assert.Contains("__queryMask.IsEnabled(i)", emitted.Cpp);
-        }
-
-        [Fact]
         public void ManualSimd_ReportsItsExplicitMaskLimitation()
             => Assert.True(Chunk("Cpp", "mask.Length != 0 && !mask.IsEnabled(i)", "Enabled").HasDiagnostic("NT031"));
 
@@ -108,24 +91,15 @@ public struct Value { public int Count; }
 [NativeTranspile(Target = BackendTarget.Cpp)]
 public struct SelectedEntity : IJobEntity { public void Execute(ref Value value) { value.Count++; } }");
             Assert.DoesNotContain(emitted.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
-            var adapter = Assert.Single(Directory.GetFiles(emitted.OutputDir, "*SelectedEntity*Adapter.cpp", SearchOption.AllDirectories));
-            var source = File.ReadAllText(adapter);
-            Assert.Contains("_RangeAdapter(", source);
-            Assert.DoesNotContain("EntityMatchMask __queryMask", source);
+            var source = File.ReadAllText(Assert.Single(Directory.GetFiles(
+                emitted.OutputDir, "*SelectedEntity*_Execute.cpp", SearchOption.AllDirectories)));
+            // 适配函数是同一文件的尾部：从这里往后的文本里不得重新求值掩码。
+            int adapterStart = source.IndexOf("_RangeAdapter(", System.StringComparison.Ordinal);
+            Assert.True(adapterStart > 0, "RangeAdapter 未生成");
+            var adapters = source.Substring(adapterStart);
+            Assert.Contains("_RangeAdapter(", adapters);
+            Assert.DoesNotContain("EntityMatchMask __queryMask", adapters);
             Assert.Contains("EntityMatchMask __queryMask", emitted.Cpp);
-        }
-
-        [Fact]
-        public void VectorizeEntityIdentity_UsesTheEntityArrayAndDoesNotConsumeAComponentColumn()
-        {
-            var emitted = GeneratorHarness.EmitFor(@"
-using EntJoy.ECS; using NativeTranspiler;
-public struct Value { public int Count; }
-[NativeTranspile(AutoSIMD = AutoSIMD.Vectorize)]
-public struct SelectedEntity : IJobEntity { public void Execute(Entity entity, ref Value value) { value.Count = entity.Id; } }");
-            Assert.DoesNotContain(emitted.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
-            Assert.Contains("__EntJoyEntity entity = ((__EntJoyEntity*)__chunkData->entityArray)[__entity_index]", emitted.Cpp);
-            Assert.Contains("__entity_param_1_ptr = reinterpret_cast<Value*>(__chunkData->componentArrays[0])", emitted.Cpp);
         }
     }
 }

@@ -116,7 +116,10 @@ namespace NativeTranspiler.Analyzer
                     //   as the lane tracker so break can drop matched lanes and keep matching
                     //   others (see GenerateBreakStatement).
                     _loopStack.Push(new LoopFrame { TrackerVar = loopSavedMask, IterActiveVar = "", ExitLabel = exitL, ContinueLabel = contL, BodyMaskVar = bodyMaskB });
+                    // 标量循环变量在 C++ 里就是 `int <ivName>`：登记后下标 `v_i ± <ivName>` 可判连续。
+                    bool ivAdded = _uniformLoopVars.Add(ivName);
                     GenerateStatement(stmt.Statement);
+                    if (ivAdded) _uniformLoopVars.Remove(ivName);
                     _loopStack.Pop();
                     _isUniformScalarLoop = outerScalarLoop;
                     if (_gotoTargets.Contains(contL))
@@ -132,7 +135,7 @@ namespace NativeTranspiler.Analyzer
             _indent--;
             AppendLine("}");
             _currentMask = entryMask;
-            if (!string.IsNullOrEmpty(_returnedMaskVar))
+            if (!_returnedMaskVar.IsEmpty)
             {
                 string afterMask = $"__after_for_{_maskCounter++}";
                 AppendLine($"simd_mask {afterMask} = simd_mask{{ n_and_mask({entryMask}.m, n_not_mask({_returnedMaskVar}.m)) }};");
@@ -148,7 +151,7 @@ namespace NativeTranspiler.Analyzer
             string exitLabel = $"__unr_exit_{_labelCounter++}";
             AppendLine($"// Unrolled loop: {count} iterations, step {step}");
             AppendLine($"simd_value<int> simd_{ivName};");
-            string savedMask = _currentMask;
+            var savedMask = _currentMask;
 
             var bodyBlock = stmt.Statement is BlockSyntax bs
                 ? bs
@@ -185,11 +188,11 @@ namespace NativeTranspiler.Analyzer
                 // kill lanes that have already returned (e.g. found their match
                 //   in a previous unrolled j iteration and wrote R[i]=result).
                 //   result because its mask is restored to all_true by savedMask.
-                if (!string.IsNullOrEmpty(_returnedMaskVar))
+                if (!_returnedMaskVar.IsEmpty)
                 {
                     // If savedMask is the all_true literal (not a named variable), we can't
                     // assign to it. Introduce a named variable first.
-                    if (savedMask == "simd_mask::all_true()")
+                    if (savedMask.IsAllTrue)
                     {
                         string namedMask = $"__init_mask_{_labelCounter++}";
                         AppendLine($"simd_mask {namedMask} = simd_mask{{ n_and_mask({_currentMask}.m, n_not_mask({_returnedMaskVar}.m)) }};");
@@ -229,7 +232,11 @@ namespace NativeTranspiler.Analyzer
                 bool outerScalarLoop = _isUniformScalarLoop;
                 _isUniformScalarLoop = false;
 
+                bool hadConstant = _uniformIterationConstants.TryGetValue(ivName, out int previousConstant);
+                _uniformIterationConstants[ivName] = i;
                 GenerateStatement(stmt.Statement);
+                if (hadConstant) _uniformIterationConstants[ivName] = previousConstant;
+                else _uniformIterationConstants.Remove(ivName);
 
                 _isUniformScalarLoop = outerScalarLoop;
                 if (hasBreak || hasContinue)
@@ -250,10 +257,10 @@ namespace NativeTranspiler.Analyzer
             // compute the post-loop mask for the default store.
             //   - ALL lanes returned → no lane needs default → skip store entirely (goto exitLabel)
             //   - NO lanes returned → default store writes 777 for all lanes (post_mask = all lanes)
-            if (!string.IsNullOrEmpty(_returnedMaskVar))
+            if (!_returnedMaskVar.IsEmpty)
             {
                 // Compute non-returned lanes mask (for the default store)
-                if (savedMask == "simd_mask::all_true()")
+                if (savedMask.IsAllTrue)
                 {
                     string postMaskVar = $"__post_mask_{_labelCounter++}";
                     AppendLine($"simd_mask {postMaskVar} = simd_mask{{ n_and_mask({_currentMask}.m, n_not_mask({_returnedMaskVar}.m)) }};");
@@ -273,7 +280,7 @@ namespace NativeTranspiler.Analyzer
             }
             if (hasBreak)
                 AppendLine($"{exitLabel}: ;");
-            else if (!string.IsNullOrEmpty(_returnedMaskVar))
+            else if (!_returnedMaskVar.IsEmpty)
                 AppendLine($"{exitLabel}: ;");
             _unrollProduct = outerUnrollProduct;
         }
@@ -460,7 +467,7 @@ namespace NativeTranspiler.Analyzer
             // kill lanes that have already returned before using as active mask.
             //   Without this, returned lanes would re-activate each count-loop iteration
             //   (v_active is recomputed fresh each iter) and overwrite their result.
-            if (!string.IsNullOrEmpty(_returnedMaskVar))
+            if (!_returnedMaskVar.IsEmpty)
                 AppendLine($"v_active{sid} = simd_mask{{ n_and_mask(v_active{sid}.m, n_not_mask({_returnedMaskVar}.m)) }};");
 
             // Retain the enclosing branch mask for every reduction iteration.
@@ -521,7 +528,7 @@ namespace NativeTranspiler.Analyzer
             AppendLine($"simd_value<int> simd_end_{ivName} = {endExpr};");
             // 已退出的 lane 不再参与后续条件求值；每轮 body mask 单独承接 continue。
             AppendLine($"{tracker} = {tracker} & simd_mask{{ {simdCmpFunc}(simd_{ivName}.v, simd_end_{ivName}.v) }};");
-            if (!string.IsNullOrEmpty(_returnedMaskVar))
+            if (!_returnedMaskVar.IsEmpty)
                 AppendLine($"{tracker} = {tracker} & simd_mask{{ n_not_mask({_returnedMaskVar}.m) }};");
             AppendLine($"if (!{tracker}.any_true()) {{ break; }}");
             AppendLine($"simd_mask {iterActive} = {tracker};");
@@ -588,14 +595,14 @@ namespace NativeTranspiler.Analyzer
 
             // uniform 条件必须是纯标量表达式（翻译后不含 simd_value/n_cmp/v_）
             string uniformExpr = TranslateExpression(uniformCond!);
-            if (uniformExpr.Contains("simd_value") || uniformExpr.Contains("n_cmp") || uniformExpr.Contains("v_"))
+            if (SimdExprShapes.Of(uniformExpr) != SimdExprTraits.None)
                 return false;
 
             string tracker = $"__while_tracker_{_maskCounter++}";
             string exitLabel = $"__while_exit_{_labelCounter++}";
             string continueLabel = $"__while_continue_{_labelCounter++}";
             string savedMask = $"__mask_{_maskCounter++}";
-            bool savedMaskIsAllTrue = _currentMask == "simd_mask::all_true()";
+            bool savedMaskIsAllTrue = _currentMask.IsAllTrue;
 
             AppendLine($"simd_mask {tracker} = simd_mask::all_true();");
             AppendLine($"simd_mask {savedMask} = {_currentMask};");
@@ -632,7 +639,7 @@ namespace NativeTranspiler.Analyzer
 
             if (_gotoTargets.Contains(continueLabel))
                 AppendLine($"{continueLabel}: ;");
-            _currentMask = savedMaskIsAllTrue ? "simd_mask::all_true()" : savedMask;
+            _currentMask = savedMaskIsAllTrue ? SimdMask.AllTrue : savedMask;
             AppendLine("}");
             _indent--;
             if (_gotoTargets.Contains(exitLabel))
@@ -657,7 +664,7 @@ namespace NativeTranspiler.Analyzer
             // savedMask 必须在 while 之前声明：循环结束后的结果 store 会引用它
             //（`_currentMask` 在循环后被恢复为 savedMask），放循环体内会越作用域。
             string savedMask = $"__mask_{_maskCounter++}";
-            bool savedMaskIsAllTrue = _currentMask == "simd_mask::all_true()";
+            bool savedMaskIsAllTrue = _currentMask.IsAllTrue;
             AppendLine($"simd_mask {savedMask} = {_currentMask};");
 
             // 循环条件常量提升：`j < 16` 翻译出的 n_set1_epi32(16)/n_set1_ps(常量)
@@ -676,7 +683,7 @@ namespace NativeTranspiler.Analyzer
             //   否则 _currentMask 是 "a & b & c" 复合字符串，`.any_true()`/`.m` 会因运算符
             //   优先级错绑（`!a & b & c.any_true()`、`a & b & c.m`）→ 非法 C++。
             string combined = $"__wm_{_maskCounter++}";
-            if (_currentMask == "simd_mask::all_true()")
+            if (_currentMask.IsAllTrue)
                 AppendLine($"simd_mask {combined} = simd_mask{{ n_and_mask({condVar}.m, {tracker}.m) }};");
             else
                 AppendLine($"simd_mask {combined} = simd_mask{{ n_and_mask(n_and_mask({_currentMask}.m, {condVar}.m), {tracker}.m) }};");
@@ -700,7 +707,7 @@ namespace NativeTranspiler.Analyzer
                 AppendLine($"{continueLabel}: ;");
             // 若 savedMask 原本就是 all_true，循环后恢复为字面量，避免写回时被
             //   inNarrowedContext 误判成 narrowed 而走 per-lane scatter。
-            _currentMask = savedMaskIsAllTrue ? "simd_mask::all_true()" : savedMask;
+            _currentMask = savedMaskIsAllTrue ? SimdMask.AllTrue : savedMask;
             AppendLine("}");
             _indent--;
             if (_gotoTargets.Contains(exitLabel))
@@ -742,7 +749,7 @@ namespace NativeTranspiler.Analyzer
 
             // savedMask 必须在 do 之前声明：`} while(...)` 条件在 do 块之后引用它（越作用域）。
             string savedMask = $"__mask_{_maskCounter++}";
-            bool savedMaskIsAllTrue = _currentMask == "simd_mask::all_true()";
+            bool savedMaskIsAllTrue = _currentMask.IsAllTrue;
             AppendLine($"simd_mask {savedMask} = {_currentMask};");
 
             AppendLine("do");
@@ -752,7 +759,7 @@ namespace NativeTranspiler.Analyzer
             // 物化组合掩码（current & tracker），避免 _currentMask 变成 "a & b" 复合串
             //   （嵌套 if 里的 `.m`/`.any_true()` 会优先级错绑）。
             string combined = $"__dm_{_maskCounter++}";
-            if (_currentMask == "simd_mask::all_true()")
+            if (_currentMask.IsAllTrue)
                 AppendLine($"simd_mask {combined} = {tracker};");
             else
                 AppendLine($"simd_mask {combined} = simd_mask{{ n_and_mask({_currentMask}.m, {tracker}.m) }};");
@@ -773,7 +780,7 @@ namespace NativeTranspiler.Analyzer
 
             if (_gotoTargets.Contains(continueLabel))
                 AppendLine($"{continueLabel}: ;");
-            _currentMask = savedMaskIsAllTrue ? "simd_mask::all_true()" : savedMask;
+            _currentMask = savedMaskIsAllTrue ? SimdMask.AllTrue : savedMask;
 
             string condExpr = TranslateCondition(stmt.Condition);
             string condVar = $"__dcond_{_maskCounter++}";

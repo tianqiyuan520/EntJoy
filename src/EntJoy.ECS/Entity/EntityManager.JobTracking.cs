@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -21,6 +21,8 @@ namespace EntJoy.ECS
         internal void CompleteActiveJobs()
         {
             EnsureStructuralChangeAllowed();
+            // 无在册 job、无原生事件时，下面的锁与三趟清理都是空操作；与 CompleteEntityJobs 走同一条短路。
+            if (JobBookkeepingIdle()) return;
             EnsureNoJobExecuting();
 
             JobHandle[] jobs;
@@ -184,6 +186,8 @@ namespace EntJoy.ECS
         private void CompleteEntityJobs(Entity entity, Archetype? extra = null)
         {
             EnsureStructuralChangeAllowed();
+            // 没有在册 job、没有原生事件时完成作业是空操作：不取锁，避免每次单实体写入都进一次临界区。
+            if (JobBookkeepingIdle()) return;
 
             if ((uint)entity.Id >= (uint)entities.Length)
             {

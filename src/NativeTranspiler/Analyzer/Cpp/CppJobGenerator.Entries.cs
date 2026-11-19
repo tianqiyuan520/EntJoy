@@ -44,7 +44,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine($"    for (int {indexParamName} = __startIndex; {indexParamName} < {loopEnd}; ++{indexParamName})");
             sb.AppendLine("    {");
             if (anyReturn) sb.AppendLine("        [&]() {");
-            sb.Append(body);
+            sb.Append(CodeIndent.Shift(body, anyReturn ? 3 : 2));
             if (anyReturn) sb.AppendLine("        }();");
             sb.AppendLine("    }");
         }
@@ -61,21 +61,7 @@ namespace NativeTranspiler.Analyzer
             var zeroMaskField = !isVariant && !isRangeJob && autoSIMD == NativeTranspiler.AutoSIMD.Disabled
                 ? FindZeroMaskField(jobStruct, semanticModel, methodSyntax) : null;
             var stableArrays = isVariant ? null : FindStableArrayFields(jobStruct, semanticModel, methodSyntax);
-            // 普通和 bool 特化批次共用签名与内联约定。
-            sb.AppendLine("#ifndef EJ_BATCH_FORCEINLINE_PRE");
-            sb.AppendLine("#  if defined(_MSC_VER) && !defined(__clang__)");
-            sb.AppendLine("#    define EJ_BATCH_FORCEINLINE_PRE __forceinline");
-            sb.AppendLine("#  else");
-            sb.AppendLine("#    define EJ_BATCH_FORCEINLINE_PRE");
-            sb.AppendLine("#  endif");
-            sb.AppendLine("#endif");
-            sb.AppendLine("#ifndef EJ_BATCH_ALWAYS_INLINE");
-            sb.AppendLine("#  if defined(__clang__)");
-            sb.AppendLine("#    define EJ_BATCH_ALWAYS_INLINE __attribute__((always_inline))");
-            sb.AppendLine("#  else");
-            sb.AppendLine("#    define EJ_BATCH_ALWAYS_INLINE");
-            sb.AppendLine("#  endif");
-            sb.AppendLine("#endif");
+            // 普通和 bool 特化批次共用签名与内联约定（宏定义在 NativeGeneratedSupport.h）。
             if (zeroMaskField != null)
                 sb.AppendLine("template<bool __ejZeroMask>");
             string linkage = zeroMaskField == null ? "GENERATED_API" : "static";
@@ -96,7 +82,7 @@ namespace NativeTranspiler.Analyzer
                 var rangeTranslator = new CppBatchStatementTranslator(semanticModel, jobStruct,
                     indexParamName, "__startIndex", useFastMath, false,
                     countParamName, "__count");
-                sb.Append(rangeTranslator.Translate(methodSyntax.Body));
+                sb.Append(CodeIndent.Shift(rangeTranslator.Translate(methodSyntax.Body), 1));
                 sb.AppendLine("}");
                 sb.AppendLine();
                 return;
@@ -140,13 +126,43 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine($"GENERATED_API EJ_BATCH_FORCEINLINE_PRE void CALLINGCONVENTION {funcName}({paramsStr}) EJ_BATCH_ALWAYS_INLINE");
                 sb.AppendLine("{");
                 var maskType = NativeTranspiler.MapCSharpTypeToCpp(zeroMaskField.Type);
-                sb.AppendLine($"    if (*({maskType}*)((char*)__job + {offset}) == 0)");
+                sb.AppendLine($"    if (*({maskType}*){CppIntegerSemantics.CastOperand(CppIntegerSemantics.JobAddress("__job", offset))} == 0)");
                 sb.AppendLine($"        {bodyName}<true>(__job, __startIndex, __count);");
                 sb.AppendLine("    else");
                 sb.AppendLine($"        {bodyName}<false>(__job, __startIndex, __count);");
                 sb.AppendLine("}");
                 sb.AppendLine();
             }
+        }
+
+        /// <summary>
+        /// 生成"整个方法体就是一个逐元素循环"的 SIMD 体：把该循环当成批循环，
+        /// 用 si 作为批偏移、v_i 作为批内下标。不可向量化时返回 false，调用方退回标量。
+        /// </summary>
+        private static bool TryGenerateDataParallelBody(SemanticModel semanticModel, INamedTypeSymbol jobStruct,
+            MethodDeclarationSyntax methodSyntax, ForStatementSyntax loop, string loopVar,
+            NativeTranspiler.SimdMathPrecision simdMathPrecision,
+            out string body, out string startText, out string boundText)
+        {
+            body = null;
+            startText = null;
+            boundText = null;
+
+            var translator = new CppPointerStatementTranslator(semanticModel, jobStruct, false);
+            var variableAnalyzer = new SimdVariableAnalyzer(semanticModel, jobStruct, loopVar);
+            var generator = new SimdControlFlowGenerator(
+                semanticModel, jobStruct, variableAnalyzer.Analyze(methodSyntax), variableAnalyzer,
+                indexParamName: loopVar, simdIndexVar: "v_i",
+                batchOffsetVar: "si", simdMathPrecision: simdMathPrecision, batchLoopVar: "si");
+
+            body = generator.Generate(loop.Statement);
+            if (body == null) return false;
+
+            // 起止表达式按参数映射翻译（值类型参数是 X_ptr，源码名在生成物里不存在）。
+            if (!IntForLoop.TryAnalyze(loop, semanticModel, out var info)) return false;
+            startText = translator.CaptureExpression(info.Start);
+            boundText = translator.CaptureExpression(info.Bound);
+            return true;
         }
 
         private static void GenerateSingleFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath,
@@ -163,12 +179,44 @@ namespace NativeTranspiler.Analyzer
             if (methodSyntax?.Body != null)
             {
                 var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
+                var simpleTranslator = new CppPointerStatementTranslator(semanticModel, jobStruct, useFastMath);
 
                 if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
                 {
                     // IJob/static: no OuterSimdGenerator batch wrapper, use SimdControlFlowGenerator directly
                     // Inner for-loops, if-else, gather-blend all become SIMD via mask management.
                     // Output writes with varying index → per-lane scatter; uniform index → extract lane 0.
+                    //
+                    // 例外：整段 Execute 体就是一个逐元素循环时，把该循环当成批循环摊到 SIMD 链路上。
+                    // 单 lane 掩码机制在没有 index 参数的情况下只能逐元素跑，比逐元素标量还慢。
+                    if (DataParallelLoop.TryGetSole(methodSyntax.Body, semanticModel,
+                            out var dpLoop, out string dpVar, out _, out _)
+                        && TryGenerateDataParallelBody(semanticModel, jobStruct, methodSyntax, dpLoop, dpVar, simdMathPrecision,
+                            out string dpBody, out string dpStartText, out string dpBoundText))
+                    {
+                        sb.AppendLine("    {");
+                        sb.AppendLine($"        const int __dp_begin = {dpStartText};");
+                        sb.AppendLine($"        const int __dp_end = {dpBoundText};");
+                        sb.AppendLine("        int __simd_end = __dp_begin + ((__dp_end - __dp_begin) / g_simdWidthInt) * g_simdWidthInt;");
+                        sb.AppendLine("        if (__simd_end > __dp_begin)");
+                        sb.AppendLine("        {");
+                        sb.AppendLine("            simd_value<int> v_base = simd_value<int>::sequence(0, g_simdWidthInt);");
+                        sb.AppendLine("            for (int si = __dp_begin; si < __simd_end; si += g_simdWidthInt)");
+                        sb.AppendLine("            {");
+                        sb.AppendLine("                simd_value<int> v_i = v_base + si;");
+                        sb.Append(CodeIndent.Shift(dpBody, 4));
+                        sb.AppendLine("            }");
+                        sb.AppendLine("        }");
+                        sb.AppendLine($"        for (int {dpVar} = __simd_end; {dpVar} < __dp_end; ++{dpVar})");
+                        sb.AppendLine("        {");
+                        sb.Append(CodeIndent.Shift(simpleTranslator.CaptureStatement(dpLoop.Statement), 3));
+                        sb.AppendLine("        }");
+                        sb.AppendLine("    }");
+                        sb.AppendLine("}");
+                        sb.AppendLine();
+                        return;
+                    }
+
                     var varAnalyzer = new SimdVariableAnalyzer(semanticModel, jobStruct, "");
                     var variables = varAnalyzer.Analyze(methodSyntax);
                     var simdGen = new SimdControlFlowGenerator(
@@ -186,7 +234,7 @@ namespace NativeTranspiler.Analyzer
                 {
                     var translator = new CppPointerStatementTranslator(semanticModel, jobStruct, useFastMath);
                     var bodyCode = translator.Translate(methodSyntax.Body);
-                    sb.Append(bodyCode);
+                    sb.Append(CodeIndent.Shift(bodyCode, 1));
                 }
             }
             else
@@ -215,7 +263,7 @@ namespace NativeTranspiler.Analyzer
                 var sharedTypes = CollectSharedComponentTypes(jobStruct, compilation);
                 var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, sharedTypes, useFastMath);
                 var bodyCode = translator.Translate(methodSyntax.Body);
-                sb.Append(bodyCode);
+                sb.Append(CodeIndent.Shift(bodyCode, 1));
             }
             else
             {
@@ -224,43 +272,7 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("}");
         }
 
-        private static void GenerateChunkFunctionVectorize(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
-        {
-            // Generate auto-vectorizable scalar loop — Clang generates @llvm.sin.v8f32 / cos.v8f32
-            bool usesSendEvent = JobUsesSendEvent(jobStruct, compilation);
-            var chunkParams = BuildChunkJobParameters(jobStruct, includeHeader: usesSendEvent);
-            var singleFuncName = GetCppJobFunctionName(jobStruct);
-            sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {singleFuncName}({chunkParams})");
-            sb.AppendLine("{");
-            AppendLocalVariableDeclarations(jobStruct, sb, compilation: compilation);
-            sb.AppendLine("    EntityMatchMask __queryMask(__chunkData->filter, __chunkData->entityCount);");
-            sb.AppendLine("    if (!__queryMask.HasMatches()) return;");
-            var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
-            var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
-            if (methodSyntax?.Body != null)
-            {
-                var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-                var requiredTypes = CollectChunkNativeArrayTypes(jobStruct, compilation);
-                var sharedTypes = CollectSharedComponentTypes(jobStruct, compilation);
-                // Use same chunk translator as standard mode — produces scalar ptr[index].field
-                var translator = new CppChunkStatementTranslator(semanticModel, jobStruct, requiredTypes, sharedTypes, useFastMath);
-                var bodyCode = translator.Translate(methodSyntax.Body);
-                // Insert auto-vectorize pragma before the entity for-loop
-                string pragma = "#ifdef __clang__\n#pragma clang loop vectorize(enable) interleave(enable)\n#endif\n";
-                int forPos = bodyCode.IndexOf("for (");
-                if (forPos >= 0)
-                    bodyCode = bodyCode.Insert(forPos, pragma);
-                sb.Append(bodyCode);
-            }
-            else
-            {
-                sb.AppendLine("    // (empty IJobChunk Execute body)");
-            }
-            sb.AppendLine("}");
-        }
 
-        private static void GenerateEntityFunctionVectorize(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
-            => GenerateEntityChunkFunctionStandard(jobStruct, compilation, sb, useFastMath, vectorize: true);
         private static void GenerateEntityFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
         {
             var chunkParams = BuildChunkJobParameters(jobStruct, includeTypeIds: false);
@@ -368,7 +380,7 @@ namespace NativeTranspiler.Analyzer
         /// void Execute(const ChunkData* __chunkData, ... field_ptrs ...)
         /// 使用 ChunkData 轻量结构（不含 __requiredComponentTypeIds），componentArrays 直接索引。
         /// </summary>
-        private static void GenerateEntityChunkFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath, bool vectorize = false)
+        private static void GenerateEntityChunkFunctionStandard(INamedTypeSymbol jobStruct, Compilation compilation, StringBuilder sb, bool useFastMath)
         {
             var chunkParams = BuildChunkJobParameters(jobStruct, includeTypeIds: false);
             var singleFuncName = GetCppJobFunctionName(jobStruct);
@@ -422,12 +434,6 @@ namespace NativeTranspiler.Analyzer
             sb.AppendLine("    int __entity_count = __chunkData->entityCount;");
             void AppendLoop(bool filtered)
             {
-                if (vectorize && !filtered)
-                {
-                    sb.AppendLine("#ifdef __clang__");
-                    sb.AppendLine("#pragma clang loop vectorize(enable) interleave(enable)");
-                    sb.AppendLine("#endif");
-                }
                 sb.AppendLine("        for (int __entity_index = 0; __entity_index < __entity_count; ++__entity_index)");
                 sb.AppendLine("        {");
                 if (filtered)

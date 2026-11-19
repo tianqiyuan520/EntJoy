@@ -99,6 +99,53 @@ namespace EntJoy.Collections
         public T this[int index] { get { return default; } set { } }
     }
 }
+namespace EntJoy.Mathematics
+{
+    // 字段、构造与算术重载与 src/EntJoy.Mathematics/Mathematics.cs 一致。
+    // 例外：uint2 的 (uint2,uint) 除法/取模与 >> 只在这里补，供生成器覆盖无符号路径。
+    public struct float2
+    {
+        public float x, y;
+        public static readonly float2 zero = new float2(0f);
+        public float2(float x, float y) { this.x = x; this.y = y; }
+        public float2(float v) { x = y = v; }
+        public static float2 operator +(float2 a, float2 b) => new float2(a.x + b.x, a.y + b.y);
+        public static float2 operator -(float2 a, float2 b) => new float2(a.x - b.x, a.y - b.y);
+        public static float2 operator *(float2 a, float2 b) => new float2(a.x * b.x, a.y * b.y);
+        public static float2 operator *(float2 a, float b) => new float2(a.x * b, a.y * b);
+        public static float2 operator /(float2 a, float2 b) => new float2(a.x / b.x, a.y / b.y);
+        public static float2 operator /(float2 a, float b) => new float2(a.x / b, a.y / b);
+    }
+    public struct int2
+    {
+        public int x, y;
+        public static readonly int2 zero = new int2(0);
+        public int2(int x, int y) { this.x = x; this.y = y; }
+        public int2(int v) { x = y = v; }
+        public static int2 operator +(int2 a, int2 b) => new int2(a.x + b.x, a.y + b.y);
+        public static int2 operator -(int2 a, int2 b) => new int2(a.x - b.x, a.y - b.y);
+        public static int2 operator *(int2 a, int2 b) => new int2(a.x * b.x, a.y * b.y);
+        public static int2 operator *(int2 a, int b) => new int2(a.x * b, a.y * b);
+        public static int2 operator /(int2 a, int2 b) => new int2(a.x / b.x, a.y / b.y);
+        public static int2 operator /(int2 a, int b) => new int2(a.x / b, a.y / b);
+    }
+    public struct uint2
+    {
+        public uint x, y;
+        public static readonly uint2 zero = new uint2(0u);
+        public uint2(uint x, uint y) { this.x = x; this.y = y; }
+        public uint2(uint v) { x = y = v; }
+        public static uint2 operator +(uint2 a, uint2 b) => new uint2(a.x + b.x, a.y + b.y);
+        public static uint2 operator -(uint2 a, uint2 b) => new uint2(a.x - b.x, a.y - b.y);
+        public static uint2 operator *(uint2 a, uint2 b) => new uint2(a.x * b.x, a.y * b.y);
+        public static uint2 operator *(uint2 a, uint b) => new uint2(a.x * b, a.y * b);
+        public static uint2 operator /(uint2 a, uint2 b) => new uint2(a.x / b.x, a.y / b.y);
+        public static uint2 operator /(uint2 a, uint b) => new uint2(a.x / b, a.y / b);
+        public static uint2 operator %(uint2 a, uint2 b) => new uint2(a.x % b.x, a.y % b.y);
+        public static uint2 operator %(uint2 a, uint b) => new uint2(a.x % b, a.y % b);
+        public static uint2 operator >>(uint2 a, int s) => new uint2(a.x >> s, a.y >> s);
+    }
+}
 namespace EntJoy.JobSystem
 {
     public interface IJob { }

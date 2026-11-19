@@ -245,6 +245,9 @@ namespace NativeTranspiler.Analyzer
 
         protected override void TranslateElementAccess(ElementAccessExpressionSyntax elementAccess)
         {
+            if (TryTranslateBatchRelativeAccess(elementAccess))
+                return;
+
             var exprType = _semanticModel.GetTypeInfo(elementAccess.Expression).Type;
             if (exprType != null && NativeTranspiler.IsEntJoyContainerNamed(exprType, Config.NativeList))
             {
@@ -265,8 +268,103 @@ namespace NativeTranspiler.Analyzer
             base.TranslateElementAccess(elementAccess);
         }
 
+        /// <summary>
+        /// 批内相对寻址：`A[index + k]`（index 是批索引，k 为 uniform）发射成
+        /// `(A_ptr + 批起点)[__batchRel + k]`。ISPC 只在索引相对批起点时才把常量偏移
+        /// 折进指令位移；绝对下标会让它为每个 k 现算一次字节偏移（每元素多两条标量指令）。
+        /// 非仿射下标（`index * 2`、`index % n`）保持原样，语义不变。
+        /// </summary>
+        private bool TryTranslateBatchRelativeAccess(ElementAccessExpressionSyntax elementAccess)
+        {
+            if (_batchIndexParam == null || string.IsNullOrEmpty(_batchStartExpr)) return false;
+            var args = elementAccess.ArgumentList.Arguments;
+            if (args.Count != 1) return false;
+
+            var exprType = _semanticModel.GetTypeInfo(elementAccess.Expression).Type;
+            if (exprType == null || !NativeTranspiler.IsEntJoyContainerNamed(exprType, Config.NativeArray)) return false;
+            string fieldName = SimpleMemberName(elementAccess.Expression);
+            if (fieldName == null) return false;
+
+            if (!TrySplitBatchIndex(args[0].Expression, out string indexSuffix)) return false;
+
+            _builder.Append('(').Append(fieldName).Append("_ptr + ").Append(_batchStartExpr).Append(")[")
+                    .Append(BatchRelativeVar).Append(indexSuffix).Append(']');
+            return true;
+        }
+
+        /// <summary>
+        /// 下标拆成 "批索引 + 带符号的 uniform 项"：返回拼在 <see cref="BatchRelativeVar"/> 后面的后缀
+        /// （`+ (1)` / `- (k)` / 空串）。批索引出现次数不为 1 时返回 false，调用方保持绝对寻址。
+        /// </summary>
+        private bool TrySplitBatchIndex(ExpressionSyntax expr, out string indexSuffix)
+        {
+            indexSuffix = null;
+            int coeff = 0;
+            var terms = new List<(char Sign, string Text)>();
+            if (!AccumulateBatchIndex(expr, ref coeff, terms)) return false;
+            if (coeff != 1) return false;
+            var suffix = new System.Text.StringBuilder();
+            foreach (var (sign, text) in terms)
+                suffix.Append(' ').Append(sign).Append(" (").Append(text).Append(')');
+            indexSuffix = suffix.ToString();
+            return true;
+        }
+
+        /// <summary>
+        /// 沿加减链累加批索引的出现次数，其余部分按带符号的 uniform 项收集。
+        /// 减法右侧含批索引（`index - index`）无法用常量位移表达，直接拒绝。
+        /// </summary>
+        private bool AccumulateBatchIndex(ExpressionSyntax expr, ref int coeff, List<(char Sign, string Text)> terms)
+        {
+            switch (expr)
+            {
+                case ParenthesizedExpressionSyntax paren:
+                    return AccumulateBatchIndex(paren.Expression, ref coeff, terms);
+
+                case IdentifierNameSyntax id when IsBatchIndex(id):
+                    coeff++;
+                    return true;
+
+                case BinaryExpressionSyntax add when add.IsKind(SyntaxKind.AddExpression):
+                    return AccumulateBatchIndex(add.Left, ref coeff, terms)
+                        && AccumulateBatchIndex(add.Right, ref coeff, terms);
+
+                case BinaryExpressionSyntax sub when sub.IsKind(SyntaxKind.SubtractExpression):
+                {
+                    if (!AccumulateBatchIndex(sub.Left, ref coeff, terms)) return false;
+                    if (ContainsBatchIndexReference(sub.Right)) return false;
+                    terms.Add(('-', CaptureExpression(sub.Right)));
+                    return true;
+                }
+
+                default:
+                {
+                    // 子树里还含批索引（`index * 2`、`index % n`、`f(index)`）⇒ 不是仿射，保持绝对寻址。
+                    if (ContainsBatchIndexReference(expr)) return false;
+                    terms.Add(('+', CaptureExpression(expr)));
+                    return true;
+                }
+            }
+        }
+
+        private bool ContainsBatchIndexReference(SyntaxNode node)
+        {
+            foreach (var identifier in node.DescendantNodesAndSelf().OfType<IdentifierNameSyntax>())
+                if (IsBatchIndex(identifier))
+                    return true;
+            return false;
+        }
+
         protected override void TranslateExpression(ExpressionSyntax expr)
         {
+            if (expr is LiteralExpressionSyntax flatLiteral
+                && flatLiteral.Token.IsKind(SyntaxKind.NumericLiteralToken)
+                && FormatFlatLiteral(flatLiteral) is string flatReplacement)
+            {
+                _builder.Append(flatReplacement);
+                return;
+            }
+
             // `default` / `default(T)`：C++ 生成 T{} 值初始化，ISPC 无该语法（会原样输出
             // EntJoy::Mathematics::float2{} → 语法错）。向量走 make_*，标量走 0/0.0f，
             // 用户 struct 走生成头文件里的 make_zero_X()；其余类型不改写（显式报错而非静默错译）。

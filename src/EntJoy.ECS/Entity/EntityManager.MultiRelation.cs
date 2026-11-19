@@ -5,9 +5,9 @@ using System.Runtime.CompilerServices;
 namespace EntJoy.ECS
 {
     /// <summary>
-    /// 多实例关系（[MultiRelation]）操作：双模式路由。
-    /// - 托管列表模式（[MultiRelation]，MaxSlots=0）：RelationListStore（无界，主线程，NT017 拦截 Job）。
-    /// 叠加 [ExclusiveTarget] 时 target 侧唯一（背包：物品唯一持有者）。
+    /// 多实例关系（[RelationshipComponent(Multiple = true)]）操作：双模式路由。
+    /// - 托管列表模式（[RelationshipComponent(Multiple = true)]，MaxTargets=0）：RelationListStore（无界，主线程，NT017 拦截 Job）。
+    /// 同一特性设置 ExclusiveTarget = true 时，target 至多有一个持有者。
     /// </summary>
     public unsafe partial class EntityManager
     {
@@ -37,7 +37,7 @@ namespace EntJoy.ECS
             var compType = ComponentTypeManager.GetComponentType(typeof(TRel));
             if (!compType.IsMultiRelation)
                 throw new InvalidOperationException(
-                    $"HasRelationship(entity, target) is only for [MultiRelation] types. '{typeof(TRel).Name}' is not marked [MultiRelation].");
+                    $"HasRelationship(entity, target) requires a multi-target relationship; configure Multiple or MaxTargets on '{typeof(TRel).Name}'.");
             if (!IsAlive(entity) || !IsAlive(target)) return false;
             var slotValue = RelationSlot.From(target);
 

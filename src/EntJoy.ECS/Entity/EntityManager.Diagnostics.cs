@@ -266,12 +266,32 @@ namespace EntJoy.ECS
         public void Restore(WorldSnapshot snapshot) => RestorePreparedSnapshot(snapshot);
 
         /// <summary>
-        /// 设置组件值（泛型版本，调用 SetRaw）
+        /// 设置组件值（泛型版本）。值不经装箱、不拿 GCHandle，直接写列；
+        /// 关系列（走 Add 语义）、有观察者（要派发新值）、原型含可析构列或 shared 列（要先收拾旧值与分组）时退回对象路径。
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void Set<T>(Entity entity, T t) where T : struct, IComponentData
+        public void Set<T>(Entity entity, T t) where T : struct
         {
-            SetRaw(entity, typeof(T), t);
+            CheckDisposed();
+            var metadata = ComponentTypeManager.GetComponentType<T>();
+            if (metadata.IsRelation || _observerCount != 0)
+            {
+                SetRaw(entity, typeof(T), t);
+                return;
+            }
+
+            if (!JobBookkeepingIdle()) CompleteEntityJobs(entity);
+            using (EnterStructural())
+            {
+                ref var entityInfoRef = ref GetAliveInfoRef(entity);
+                var arch = entityInfoRef.Archetype;
+                if (arch.HasDisposableComponents || arch.HasSharedColumns)
+                {
+                    arch.SetStorageRaw(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, metadata, t);
+                    return;
+                }
+                arch.SetUnchecked(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk, t);
+            }
         }
 
         /// <summary>
@@ -289,7 +309,7 @@ namespace EntJoy.ECS
                 AddComponentRaw(entity, componentType, value);
                 return;
             }
-            CompleteEntityJobs(entity);
+            if (!JobBookkeepingIdle()) CompleteEntityJobs(entity);
             using (EnterStructural())
             {
                 ref var entityInfoRef = ref GetAliveInfoRef(entity);
@@ -330,7 +350,7 @@ namespace EntJoy.ECS
             {
                 ref var entityInfoRef = ref GetAliveInfoRef(entity);
                 var arch = entityInfoRef.Archetype;
-                return ref arch.GetComponent<T>(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk);
+                return ref arch.GetComponentUnchecked<T>(entityInfoRef.ChunkIndex, entityInfoRef.SlotInChunk);
             }
         }
 
@@ -363,7 +383,8 @@ namespace EntJoy.ECS
         public void SetComponentEnabled<T>(Entity entity, bool enabled) where T : struct, IEnableableComponent
         {
             CheckDisposed();
-            CompleteEntityJobs(entity);
+            // 记账标记为 0 时没有要等的 Job；完成路径要取锁，先看标记能整句跳过。
+            if (!JobBookkeepingIdle()) CompleteEntityJobs(entity);
             using (EnterStructural())
             {
                 ref var info = ref GetAliveInfoRef(entity);
@@ -390,9 +411,9 @@ namespace EntJoy.ECS
         /// <summary>取组件在该实体所属原型中的列下标；实体没有该组件时抛出。</summary>
         private static int RequireComponentIndex<T>(Archetype archetype, Entity entity) where T : struct
         {
-            if (!archetype.Has(typeof(T)))
+            if (!archetype.TryGetComponentTypeIndex(ComponentTypeManager.GetComponentType<T>(), out int componentIndex))
                 throw new InvalidOperationException($"Entity {entity} does not have component {typeof(T).Name}.");
-            return archetype.GetComponentTypeIndex<T>();
+            return componentIndex;
         }
     }
 }

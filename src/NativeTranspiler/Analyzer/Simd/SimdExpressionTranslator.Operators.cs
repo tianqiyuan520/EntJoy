@@ -50,8 +50,8 @@ namespace NativeTranspiler.Analyzer
 
                 // Varying comparison → SIMD compare (detect int vs float)
                 // Wrap complex expressions in parens so .v binds to the whole expression, not just the last term
-                string leftV = leftKind >= VarKind.Varying ? $"({left}).v" : $"{left}";
-                string rightV = rightKind >= VarKind.Varying ? $"({right}).v" : $"{right}";
+                string leftV = leftKind >= VarKind.Varying ? $"{CppIntegerSemantics.MemberOperand(left)}.v" : $"{left}";
+                string rightV = rightKind >= VarKind.Varying ? $"{CppIntegerSemantics.MemberOperand(right)}.v" : $"{right}";
 
                 bool cmpIsInt = booleanOperands;
                 bool cmpIsUint = false;   // (uint)x-style comparisons need unsigned semantics
@@ -94,32 +94,32 @@ namespace NativeTranspiler.Analyzer
                 bool useUnsignedCmp = cmpIsUint;
                 string bc = useUnsignedCmp || cmpIsInt ? "n_set1_epi32" : "n_set1_ps";
                 // Hoisted broadcasts (__uni_ prefixed) are already SIMD — use .v, don't re-broadcast
-                bool rightIsHoisted = right.StartsWith("__uni_");
-                bool leftIsHoisted = left.StartsWith("__uni_");
+                bool rightIsHoisted = SimdExprShapes.Of(right).HasFlag(SimdExprTraits.HoistedBroadcast);
+                bool leftIsHoisted = SimdExprShapes.Of(left).HasFlag(SimdExprTraits.HoistedBroadcast);
                 if (leftKind < VarKind.Varying && rightKind >= VarKind.Varying)
                 {
                     if (leftIsHoisted)
-                        rightV = $"({right}).v";
+                        rightV = $"{CppIntegerSemantics.MemberOperand(right)}.v";
                     else
                         leftV = $"{bc}({left})";
                 }
                 else if (leftKind >= VarKind.Varying && rightKind < VarKind.Varying)
                 {
                     if (rightIsHoisted)
-                        rightV = $"({right}).v";
+                        rightV = $"{CppIntegerSemantics.MemberOperand(right)}.v";
                     else
                         rightV = $"{bc}({right})";
                 }
                 // If hoisted broadcast ended up on wrong side, correct
-                if (rightIsHoisted && !rightV.Contains(".v")) rightV = $"({right}).v";
-                if (leftIsHoisted && !leftV.Contains(".v")) leftV = $"({left}).v";
+                if (rightIsHoisted && !rightV.Contains(".v")) rightV = $"{CppIntegerSemantics.MemberOperand(right)}.v";
+                if (leftIsHoisted && !leftV.Contains(".v")) leftV = $"{CppIntegerSemantics.MemberOperand(left)}.v";
 
                 if (useUnsignedCmp) {
                     // Unsigned compare: x^0x80000000 converts two's-complement order to
                     // sign-magnitude order, so the signed compare works on the flipped values.
                     string flipConst = "(int)0x80000000";
-                    string leftUniform = left.StartsWith("__uni_") ? $"({left}).v" : $"n_set1_epi32({left})";
-                    string rightUniform = right.StartsWith("__uni_") ? $"({right}).v" : $"n_set1_epi32({right})";
+                    string leftUniform = leftIsHoisted ? $"{CppIntegerSemantics.MemberOperand(left)}.v" : $"n_set1_epi32({left})";
+                    string rightUniform = rightIsHoisted ? $"{CppIntegerSemantics.MemberOperand(right)}.v" : $"n_set1_epi32({right})";
                     string leftFlip = leftKind >= VarKind.Varying ? $"simd_value<int>{{ n_xor_epi32({leftV}, n_set1_epi32({flipConst})) }}.v" : $"n_xor_epi32({leftUniform}, n_set1_epi32({flipConst}))";
                     string rightFlip = rightKind >= VarKind.Varying ? $"simd_value<int>{{ n_xor_epi32({rightV}, n_set1_epi32({flipConst})) }}.v" : $"n_xor_epi32({rightUniform}, n_set1_epi32({flipConst}))";
                     string ic2 = op switch {
@@ -150,7 +150,7 @@ namespace NativeTranspiler.Analyzer
             {
                 if (!anyVarying) return $"({left} {op} {right})";
                 string maskOp = binary.IsKind(SyntaxKind.LogicalAndExpression) ? "n_and_mask" : "n_or_mask";
-                return $"simd_mask{{ {maskOp}(({TranslateCondition(binary.Left)}).m, ({TranslateCondition(binary.Right)}).m) }}";
+                return $"simd_mask{{ {maskOp}({CppIntegerSemantics.MemberOperand(TranslateCondition(binary.Left))}.m, {CppIntegerSemantics.MemberOperand(TranslateCondition(binary.Right))}.m) }}";
             }
 
             // Arithmetic operators
@@ -184,6 +184,16 @@ namespace NativeTranspiler.Analyzer
                     return $"simd_mod_u32({left}, {modVal}u)";
             }
 
+            // 无符号整数运算通解：C# 的 uint / uint2 的 / % >> 是无符号语义，C++ 的 int 运算是有符号的。
+            // 只要任一侧是无符号整数（含 uint2 分量/pair），就改走 simd_*_u32 helper（标量与 pair 都有重载）。
+            if (op is "/" or "%" or ">>" && AnyUnsignedOperand(binary))
+            {
+                string helper = op switch { "/" => "simd_div_u32", "%" => "simd_mod_u32", _ => "simd_shr_u32" };
+                if (op == ">>")
+                    return $"{helper}({left}, {right})";
+                // 常量模数已有更优的 simd_mod_u32(x, const) 分支，这里处理运行时除数/模数。
+                return $"{helper}({left}, {right})";
+            }
             string simdOp = op switch
             {
                 "+" => "+",
@@ -217,7 +227,7 @@ namespace NativeTranspiler.Analyzer
 
                 if (leftIsUint)
                 {
-                    string leftV = leftKind >= VarKind.Varying ? $"({left}).v" : left;
+                    string leftV = leftKind >= VarKind.Varying ? $"{CppIntegerSemantics.MemberOperand(left)}.v" : left;
                     return $"simd_value<int>{{ n_srli_epi32({leftV}, {right}) }}";
                 }
             }
@@ -234,45 +244,82 @@ namespace NativeTranspiler.Analyzer
         {
             bool isInt = IsInt32Type(expr);
             if (translated.StartsWith("__uni_"))
-                return isInt ? $"n_cvtepi32_ps(({translated}).v)" : $"({translated}).v";
+                return isInt ? $"n_cvtepi32_ps({CppIntegerSemantics.MemberOperand(translated)}.v)" : $"{CppIntegerSemantics.MemberOperand(translated)}.v";
             VarKind kind = _varAnalyzer.ClassifyExpression(expr);
             if (kind >= VarKind.Varying)
-                return isInt ? $"n_cvtepi32_ps(({translated}).v)" : $"({translated}).v";
+                return isInt ? $"n_cvtepi32_ps({CppIntegerSemantics.MemberOperand(translated)}.v)" : $"{CppIntegerSemantics.MemberOperand(translated)}.v";
             return isInt ? $"n_cvtepi32_ps(n_set1_epi32({translated}))" : $"n_set1_ps({translated})";
         }
 
+        /// <summary>
+        /// 操作数是否无符号整数：uint/ushort/byte 标量、uint2 pair、以及 u 后缀字面量。
+        /// 这是 / % >> 选择无符号 helper 的唯一判据（类型符号优先，语法兜底）。
+        /// </summary>
+        private bool AnyUnsignedOperand(BinaryExpressionSyntax binary)
+            => IsUnsignedInteger(binary.Left) || IsUnsignedInteger(binary.Right);
+
+        private bool IsUnsignedInteger(ExpressionSyntax expr)
+        {
+            if (expr is LiteralExpressionSyntax literal && literal.Token.Text.EndsWith("u", System.StringComparison.OrdinalIgnoreCase))
+                return true;
+            // (uint)x / (uint2)x 之类：类型符号或语法名都认。
+            var target = expr is CastExpressionSyntax cast ? cast.Type : expr;
+            var type = SymbolHelper.GetBoundType(_semanticModel, target);
+            if (type != null)
+            {
+                if (type.SpecialType is SpecialType.System_UInt32 or SpecialType.System_UInt16 or SpecialType.System_Byte)
+                    return true;
+                if (SimdVectorTypes.IsUint2(NativeTranspiler.MapCSharpTypeToCpp(type)))
+                    return true;
+            }
+            string leaf = SimdVectorTypes.LeafName(target.ToString().Replace('.', ':'));
+            return leaf is "uint" or "uint2" or "ushort" or "byte";
+        }
         private string TranslateCast(CastExpressionSyntax cast)
         {
             string inner = TranslateExpression(cast.Expression);
             VarKind innerKind = _varAnalyzer.ClassifyExpression(cast.Expression);
-            string targetTypeStr = cast.Type.ToString();
+            // 目标类型优先用类型符号；重写树里的 cast 节点可能没有来源注解，此时用语法名兜底
+            // （语法名只认关键字与限定名，`int2` / `EntJoy.Mathematics.int2` 两种拼写都覆盖）。
+            var targetSymbol = SymbolHelper.GetBoundType(_semanticModel, cast.Type);
+            string targetCppType = targetSymbol != null ? NativeTranspiler.MapCSharpTypeToCpp(targetSymbol) : "";
+            string targetText = cast.Type.ToString();
+            string targetLeaf = SimdVectorTypes.LeafName(targetCppType.Length > 0 ? targetCppType : targetText.Replace('.', ':'));
+
+            bool targetIsInt = targetSymbol?.SpecialType == SpecialType.System_Int32 || targetLeaf == "int" || targetLeaf == "Int32";
+            bool targetIsUint = targetSymbol?.SpecialType == SpecialType.System_UInt32 || targetLeaf == "uint" || targetLeaf == "UInt32";
 
             // Hoisted broadcasts are already the correct SIMD type — skip cast entirely
             if (inner.StartsWith("__uni_"))
                 return inner;
 
             // For varying int -> unsigned int: keep {inner} as-is (n_cmp_*_epi32 works on raw n_int)
-            if (innerKind >= VarKind.Varying && (targetTypeStr == "uint" || targetTypeStr == "unsigned int"))
+            if (innerKind >= VarKind.Varying && targetIsUint)
                 return $"{inner}";
+
+            // 窄整数 cast：在向量域内截断（(byte)/(sbyte)/(ushort)/(short)），
+            // 值仍留在 int32 lane，避免生成 `(unsigned char)(simd_value<int>)`。
+            if (innerKind >= VarKind.Varying && SimdVectorTypes.NarrowTruncFn(targetCppType) is { } truncFn)
+                return $"{truncFn}({inner})";
 
             // SIMD type conversions: (int2)simd_value<float2> → simd_value<int2>::convert(...)
             if (innerKind >= VarKind.Varying)
             {
-                if (targetTypeStr.Contains("int2"))
+                // uint2 的算术与 int2 位相同，用 int2 的寄存器类型承载。
+                if (targetLeaf == "int2" || targetLeaf == "uint2")
                     return $"simd_value<EntJoy::Mathematics::int2>::convert({inner})";
-                if (targetTypeStr == "int" || targetTypeStr == "System.Int32")
+                if (targetIsInt)
                     return $"simd_value<int>::convert({inner})";
                 // (float2)simd_value<float2> → just the inner value (identity conversion)
-                if (targetTypeStr.Contains("float2"))
+                if (targetLeaf == "float2")
                     return inner;
             }
 
             // (int)floatExpr → scalar convert (uniform path)
-            var targetType = SymbolHelper.GetBoundType(_semanticModel, cast.Type);
-            if (targetType != null)
-                return $"({NativeTranspiler.MapCSharpTypeToCpp(targetType)}){inner}";
+            if (targetCppType.Length > 0)
+                return $"({targetCppType}){inner}";
 
-            return $"({targetTypeStr.Replace(".", "::")}){inner}";
+            return $"({targetText.Replace(".", "::")}){inner}";
         }
 
         /// <summary>
@@ -296,11 +343,11 @@ namespace NativeTranspiler.Analyzer
                 // 数组字段 `X_ptr` 已是目标元素类型的指针，直接用；
                 // 裸指针变量本身是指针，同样直接用（不要转型 —— `(T*)p[i]` 是非法 lvalue 转型）。
                 string elemPtr = info.Base;
-                bool narrowed = _currentMask != "simd_mask::all_true()";
-                string guard = narrowed ? $"if((n_mask_to_bitmask(({_currentMask}).m)&(1<<__l))!=0)" : "";
+                bool narrowed = !_currentMask.IsAllTrue;
+                string guard = narrowed ? $"if((n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m)&(1<<__l))!=0)" : "";
                 if (idxKind >= VarKind.Varying)
                 {
-                    string lv = $"{elemPtr}[n_extract_lane_epi32(({idxExpr}).v,__l)]";
+                    string lv = $"{elemPtr}[n_extract_lane_epi32({CppIntegerSemantics.MemberOperand(idxExpr)}.v,__l)]";
                     return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{guard}{lv} {op} 1;}}}}";
                 }
                 return $"{elemPtr}[{idxExpr}] {op} 1;";
@@ -309,7 +356,7 @@ namespace NativeTranspiler.Analyzer
             {
                 string target = TranslateExpression(operand);
                 if (target.Contains(UnsupportedMarkers.Prefix)) return marker;
-                if (_currentMask != "simd_mask::all_true()"
+                if (!_currentMask.IsAllTrue
                     && (_forLoopVars.Contains(identifier.Identifier.Text)
                         || (_variables.TryGetValue(identifier.Identifier.Text, out var variable)
                             && variable.Kind >= VarKind.Varying)))

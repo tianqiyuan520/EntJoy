@@ -10,22 +10,43 @@ namespace EntJoy.ECS
         public ref T GetComponent<T>(int chunkIndex, int slotInChunk) where T : struct
         {
             var componentIndex = GetComponentTypeIndex<T>();
-            return ref _chunkList[chunkIndex].GetComponent<T>(slotInChunk, componentIndex);
+            ref var chunk = ref CollectionsMarshal.AsSpan(_chunkList)[chunkIndex];
+            return ref chunk.GetComponent<T>(slotInChunk, componentIndex);
+        }
+
+        /// <summary>已校验过的实体句柄走这里：省掉块的处置/越界复查与列下标复查，只保留关系列只读判据。</summary>
+        internal ref T GetComponentUnchecked<T>(int chunkIndex, int slotInChunk) where T : struct
+        {
+            var componentIndex = GetComponentTypeIndex<T>();
+            ref var chunk = ref CollectionsMarshal.AsSpan(_chunkList)[chunkIndex];
+            return ref chunk.GetComponentUnchecked<T>(slotInChunk, componentIndex);
         }
 
         public ref readonly T GetComponentReadOnly<T>(int chunkIndex, int slotInChunk) where T : struct
         {
             CheckReadable();
             int componentIndex = GetComponentTypeIndex<T>();
-            return ref _chunkList[chunkIndex].GetComponentReadOnly<T>(slotInChunk, componentIndex);
+            ref readonly var chunk = ref CollectionsMarshal.AsSpan(_chunkList)[chunkIndex];
+            return ref chunk.GetComponentReadOnly<T>(slotInChunk, componentIndex);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Set<T>(int chunkIndex, int slotInChunk, T value) where T : struct
         {
             var componentIndex = GetComponentTypeIndex<T>();
-            _chunkList[chunkIndex].GetComponent<T>(slotInChunk, componentIndex) = value;
-            NotifyComponentChanged(chunkIndex, slotInChunk);
+            ref var chunk = ref CollectionsMarshal.AsSpan(_chunkList)[chunkIndex];
+            chunk.GetComponent<T>(slotInChunk, componentIndex) = value;
+            // 同一个块引用上直接标变更，不再按块号重取一次。
+            chunk.MarkEntityChanged(slotInChunk);
+        }
+
+        /// <summary>已校验过的实体句柄走这里：省掉块的处置/越界复查与列下标复查，只保留关系列只读判据。</summary>
+        internal void SetUnchecked<T>(int chunkIndex, int slotInChunk, T value) where T : struct
+        {
+            var componentIndex = GetComponentTypeIndex<T>();
+            ref var chunk = ref CollectionsMarshal.AsSpan(_chunkList)[chunkIndex];
+            chunk.GetComponentUnchecked<T>(slotInChunk, componentIndex) = value;
+            chunk.MarkEntityChanged(slotInChunk);
         }
 
         /// <summary>按 boxed 值写入组件槽位；关系列必须走 EntityManager 或 DeferredCommandBuffer。</summary>
@@ -45,7 +66,7 @@ namespace EntJoy.ECS
         internal unsafe void SetStorageRaw(int chunkIndex, int slotInChunk, ComponentType compType, object value)
         {
             var componentIndex = GetComponentTypeIndex(compType);
-            var chunk = _chunkList[chunkIndex];
+            ref readonly var chunk = ref CollectionsMarshal.AsSpan(_chunkList)[chunkIndex];
             var compSize = compType.Size;
             var compPtr = (byte*)chunk.GetComponentArrayPointer(componentIndex) + slotInChunk * compSize;
 
@@ -70,28 +91,34 @@ namespace EntJoy.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal void NotifyComponentChanged(int chunkIndex, int slotInChunk)
         {
-            _chunkList[chunkIndex].MarkEntityChanged(slotInChunk);
+            ref var chunk = ref CollectionsMarshal.AsSpan(_chunkList)[chunkIndex];
+            chunk.MarkEntityChanged(slotInChunk);
         }
 
         /// <summary>把本源型某个槽位的全部非 shared 组件搬到另一个原型；可启用组件的启用位同时搬移。</summary>
         public unsafe void CopyComponentsTo(int sourceChunkIndex, int sourceSlot, Archetype target, int targetChunkIndex, int targetSlot)
         {
-            var sourceChunk = _chunkList[sourceChunkIndex];
+            ref readonly var sourceChunk = ref CollectionsMarshal.AsSpan(_chunkList)[sourceChunkIndex];
             ref var targetChunk = ref CollectionsMarshal.AsSpan(target._chunkList)[targetChunkIndex];
+            // shared 列不随实体迁移；可启用位、析构标记按原型定，三者都不必逐列查类型表。
+            bool sharedColumns = HasSharedColumns;
+            bool disposables = HasDisposableComponents;
+            bool enableables = sourceChunk.Meta.HasEnableables;
 
-            foreach (var type in types)
+            // 列序与本原型 types 顺序一致（构造时按同一顺序建 _componentColumns），源列下标即 i。
+            for (int i = 0; i < types.Length; i++)
             {
-                if (type.IsShared) continue;
-                // 两侧都走按 id 的列索引快路径，避免每列两次字典探测。
-                if (target.TryGetComponentTypeIndex(type, out int targetComponentIndex))
-                {
-                    TryGetComponentTypeIndex(type, out int sourceComponentIndex);
-                    var sourcePtr = (byte*)sourceChunk.GetComponentArrayPointer(sourceComponentIndex) + sourceSlot * type.Size;
-                    var targetPtr = (byte*)targetChunk.GetComponentArrayPointer(targetComponentIndex) + targetSlot * type.Size;
-                    // move 转移所有权：可析构组件拷贝后清空源，避免源被销毁时释放目标仍在用的内存。
-                    ComponentTypeManager.MoveComponentValue(type, sourcePtr, targetPtr);
-                    if (type.IsEnableable) targetChunk.SetComponentEnabled(targetComponentIndex, targetSlot, sourceChunk.GetComponentEnabled(sourceComponentIndex, sourceSlot));
-                }
+                var type = types[i];
+                if (sharedColumns && type.IsShared) continue;
+                if (!target.TryGetComponentTypeIndex(type, out int targetComponentIndex)) continue;
+                var sourcePtr = (byte*)sourceChunk.GetComponentArrayPointer(i) + sourceSlot * type.Size;
+                var targetPtr = (byte*)targetChunk.GetComponentArrayPointer(targetComponentIndex) + targetSlot * type.Size;
+                // move 转移所有权：可析构组件拷贝后清空源，避免源被销毁时释放目标仍在用的内存。
+                // 非析构组件（绝大多数）只需位拷贝，不必进 ComponentTypeManager 的 move 分支。
+                if (disposables && type.IsDisposable) ComponentTypeManager.MoveComponentValue(type, sourcePtr, targetPtr);
+                else BufferCopy.Copy(targetPtr, sourcePtr, type.Size);
+                if (enableables && type.IsEnableable)
+                    targetChunk.SetComponentEnabled(targetComponentIndex, targetSlot, sourceChunk.GetComponentEnabled(i, sourceSlot));
             }
         }
     }

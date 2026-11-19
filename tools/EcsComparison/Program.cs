@@ -34,7 +34,16 @@ else if (args.Length > 0 && args[0] == "--matched-dependency")
 else if (args.Length > 0 && args[0] == "--matched-query")
     QueryMatchedComparison.Run();
 else if (args.Length > 0 && args[0] == "--traversal-matrix")
+{
+    // 矩阵路径每个臂新建世界，与 --ab-pair 的共享探针读数不同；块容量与档位要在这条路径上也能改，
+    // 否则块数对齐只能在 --ab-pair 里做，两种口径的读数不能互比。
+    foreach (string arg in args)
+        if (arg.StartsWith("--chunk-capacity=", StringComparison.Ordinal))
+            EntJoy.ECS.Archetype.ChunkCapacityOverride = int.Parse(arg.Substring("--chunk-capacity=".Length));
+        else if (arg.StartsWith("--matrix-entities=", StringComparison.Ordinal))
+            TraversalMatrix.EntityCountsOverride = new[] { int.Parse(arg.Substring("--matrix-entities=".Length)) };
     TraversalMatrix.Run(false);
+}
 else if (args.Length > 0 && args[0] == "--query-matrix")
     TraversalMatrix.Run(false, queryOnly: true);
 else if (args.Length > 0 && args[0] == "--chunk-job-matrix")
@@ -60,6 +69,9 @@ else if (args.Length > 0 && args[0] == "--job-overhead")
                 ("job-empty-body", probe.EntJoyEmptyJobCSharp),
                 ("chunk-job", probe.EntJoyChunkJobCSharp),
                 ("chunk", probe.EntJoyChunk),
+                ("job-cpp", probe.EntJoyJobCpp),
+                ("job-empty-cpp", probe.EntJoyEmptyJobCpp),
+                ("chunk-job-cpp", probe.EntJoyChunkJobCpp),
             };
             foreach (var entry in entries)
             {
@@ -107,6 +119,12 @@ else if (args.Length > 0 && args[0] == "--struct")
     int rounds = args.Length > 2 ? int.Parse(args[2]) : 5;
     StructuralBench.Run(n, rounds);
 }
+else if (args.Length > 0 && args[0] == "--relation-churn")
+{
+    // 关系结构变更的规模斜率：逐实体「移除 + 重建」，与普通组件同样操作配对。
+    int crounds = args.Length > 1 ? int.Parse(args[1]) : 5;
+    RelationChurnBench.Run(crounds);
+}
 else if (args.Length > 0 && args[0] == "--query-snapshot")
 {
     // 结构变更后的首次查询会重建 Chunk 快照：成对测量重建与复用两段的耗时和托管分配。
@@ -136,10 +154,12 @@ else if (args.Length > 0 && args[0] == "--ab-pair")
     int pairRounds = args.Length > 3 ? int.Parse(args[3]) : 15;
     // 可选容量覆盖：把 EntJoy 的块容量强行对齐到对照实现，用于分离「块数/容量」与「实现」两个因素。
     int pairCapacity = args.Length > 4 ? int.Parse(args[4]) : 0;
+    // 可选实体数：1 千档要配容量覆盖时也要能改档位。
+    int pairEntities = args.Length > 5 ? int.Parse(args[5]) : 100_000;
     EntJoy.ECS.Archetype.ChunkCapacityOverride = pairCapacity;
     foreach (int components in new[] { 2, 3 })
     {
-        var probe = new SystemComparison { Components = components, EntityCount = 100_000 };
+        var probe = new SystemComparison { Components = components, EntityCount = pairEntities };
         try
         {
             probe.Setup();
@@ -149,8 +169,20 @@ else if (args.Length > 0 && args[0] == "--ab-pair")
                 ("chunk", probe.EntJoyChunk),
                 ("job", probe.EntJoyJobCSharp),
                 ("chunk-job", probe.EntJoyChunkJobCSharp),
+                ("job-cpp", probe.EntJoyJobCpp),
+                ("chunk-job-cpp", probe.EntJoyChunkJobCpp),
                 ("query-movenext", probe.EntJoyMoveNextOnly),
                 ("query-read1", probe.EntJoyRead1Only),
+                ("query-shared", probe.EntJoyShared),
+                ("query-shared-base", probe.EntJoySharedBase),
+                ("query-rel", probe.EntJoyRelationship),
+                ("query-rel-enabled", probe.EntJoyRelationshipEnabled),
+                ("query-rel-base", probe.EntJoyRelationshipBase),
+                ("query-enabled", probe.EntJoyEnabled),
+                ("query-changed", probe.EntJoyChanged),
+                ("query-changed-none", probe.EntJoyChangedNone),
+                ("query-changed-base", probe.EntJoyChangedBase),
+                ("query-clean-base", probe.EntJoyCleanBase),
                 ("arch-query", probe.Arch),
                 ("arch-query-movenext", probe.ArchMoveNextOnly),
                 ("arch-chunk", probe.ArchChunk),
@@ -161,6 +193,17 @@ else if (args.Length > 0 && args[0] == "--ab-pair")
             ("absent-destroy", probe.DestroyAbsentOnly),
                 ("arch-chunk-length", probe.ArchChunkLength),
                 ("arch-chunk-movenext", probe.ArchChunkMoveNext),
+                ("random-get", probe.EntJoyRandomGet),
+                ("random-get-direct", probe.EntJoyRandomGetDirect),
+                ("arch-random-get", probe.ArchRandomGet),
+                ("random-set", probe.EntJoyRandomSet),
+                ("random-setcomponent", probe.EntJoyRandomSetComponent),
+                ("arch-random-set", probe.ArchRandomSet),
+                ("chunk-foreach-cb", probe.EntJoyChunkForEach),
+                ("chunk-scalar", probe.EntJoyChunkScalar),
+                ("query-inplace", probe.EntJoyQueryInPlace),
+                ("chunk-copy-body", probe.EntJoyChunkCopyBody),
+                ("enabled-toggle", probe.EntJoyEnabledToggle),
             };
             Action runA = null, runB = null;
             foreach (var arm in arms)
@@ -185,7 +228,7 @@ else if (args.Length > 0 && args[0] == "--ab-pair")
             ratios.Sort();
             int faster = 0;
             foreach (double r in ratios) if (r < 1) faster++;
-            Console.WriteLine($"ABPAIR_SUM components={components} a={pairA} b={pairB} n={ratios.Count} median_ratio={ratios[ratios.Count / 2]:F4} faster={faster} a_min_us={minA:F1} b_min_us={minB:F1} min_ratio={minA / minB:F4}");
+            Console.WriteLine($"ABPAIR_SUM components={components} a={pairA} b={pairB} n={ratios.Count} median_ratio={ratios[ratios.Count / 2]:F4} faster={faster} a_min_us={minA:F1} b_min_us={minB:F1} min_ratio={minA / minB:F4} entities={pairEntities} capacity={pairCapacity} chunks={probe.ChunkCount()} arch_chunks={probe.ArchChunkCount()}");
 
             static double MeasureArm(Action run)
             {
@@ -216,11 +259,16 @@ else if (args.Length > 0 && args[0] == "--ab")
                 var entries = new (string Name, Action Run)[]
                 {
                     ("query", probe.EntJoy),
+                    ("query-inplace", probe.EntJoyQueryInPlace),
                     ("chunk", probe.EntJoyChunk),
+                    ("chunk-copy-body", probe.EntJoyChunkCopyBody),
+                    ("chunk-foreach-cb", probe.EntJoyChunkForEach),
+                    ("chunk-scalar", probe.EntJoyChunkScalar),
                     ("job", probe.EntJoyJobCSharp),
                     ("chunk-job", probe.EntJoyChunkJobCSharp),
                     ("query-movenext", probe.EntJoyMoveNextOnly),
                     ("query-read1", probe.EntJoyRead1Only),
+                    ("chunk-movenext", probe.EntJoyChunkMoveNext),
                     ("arch-query", probe.Arch),
                     ("arch-query-movenext", probe.ArchMoveNextOnly),
                     ("arch-chunk", probe.ArchChunk),
@@ -293,13 +341,15 @@ internal static class StructuralBench
         var archMin = new double[Ops.Length];
         for (int i = 0; i < Ops.Length; i++) { entMin[i] = double.MaxValue; archMin[i] = double.MaxValue; }
 
-        using var world = new EntWorld("structural");
+        using var world = new EntWorld("structural", threadSafe: false);
         var m = world.EntityManager;
         var arch = ArchWorld.Create();
         var entBuffer = new EntJoy.ECS.Entity[n];
         var archBuffer = new Arch.Core.Entity[n];
 
-        for (int r = 1; r <= rounds; r++)
+        // 第 0 轮是预热轮：首轮既带 JIT 增量，又落在全新 Chunk 上（复用槽位无需清槽），
+        // 与后续轮不是同一份工作，让它参与取最小会得到无法复现的读数。
+        for (int r = 0; r <= rounds; r++)
         {
             bool entFirst = r % 2 == 1;
             for (int o = 0; o < Ops.Length; o++)
@@ -378,7 +428,7 @@ internal static class StructuralBench
             case 1:
                 for (int i = 0; i < n; i++) buf[i] = arch.Create(t2);
                 sw.Restart();
-                for (int i = 0; i < n; i++) arch.Add<C>(buf[i]);
+                for (int i = 0; i < n; i++) arch.Add<C>(buf[i], default);
                 sw.Stop();
                 Report("add", "Arch", round, sw.Elapsed.TotalMicroseconds, ref min);
                 for (int i = 0; i < n; i++) arch.Destroy(buf[i]);
@@ -403,14 +453,86 @@ internal static class StructuralBench
 
     private static void Report(string op, string framework, int round, double us, ref double min)
     {
+        if (round == 0) return;
         if (us < min) min = us;
         Console.WriteLine($"STRUCT_ROW op={op} framework={framework} round={round} us={us:F1}");
+    }
+}
+
+internal static class RelationChurnBench
+{
+    private static readonly int[] Sizes = { 2_000, 8_000, 32_000, 100_000 };
+
+    // ns/op 随实体数上升即为超线性；第 0 轮是预热轮（带首次 JIT 与全新块），不计入最小值。
+    // 小规模的读数落在 tiered JIT 的未优化代码里，跨规模比较须以 DOTNET_TieredCompilation=0 运行。
+    public static void Run(int rounds)
+    {
+        foreach (int n in Sizes)
+        {
+            using var world = new EntWorld($"relation-churn-{n}", threadSafe: false);
+            var manager = world.EntityManager;
+            var target = manager.NewEntity(typeof(A));
+            var related = new EntJoy.ECS.Entity[n];
+            for (int i = 0; i < n; i++)
+            {
+                related[i] = manager.NewEntity(typeof(A), typeof(B), typeof(RelMark));
+                manager.AddRelationship<RelMark>(related[i], target);
+            }
+            var plain = new EntJoy.ECS.Entity[n];
+            for (int i = 0; i < n; i++) plain[i] = manager.NewEntity(typeof(A), typeof(B), typeof(C));
+
+            double relationMin = double.MaxValue, plainMin = double.MaxValue;
+            var sw = new System.Diagnostics.Stopwatch();
+            for (int round = 0; round <= rounds; round++)
+            {
+                if (round % 2 == 1)
+                {
+                    plainMin = Math.Min(plainMin, Plain(manager, plain, sw));
+                    relationMin = Math.Min(relationMin, Relation(manager, related, target, sw));
+                }
+                else
+                {
+                    relationMin = Math.Min(relationMin, Relation(manager, related, target, sw));
+                    plainMin = Math.Min(plainMin, Plain(manager, plain, sw));
+                }
+            }
+            Console.WriteLine($"RCHURN_SUM entities={n} rel_us={relationMin:F1} plain_us={plainMin:F1} " +
+                $"ratio={relationMin / plainMin:F4} rel_ns={relationMin * 1000.0 / n:F2} plain_ns={plainMin * 1000.0 / n:F2}");
+        }
+    }
+
+    private static double Relation(EntityManager manager, EntJoy.ECS.Entity[] entities,
+        EntJoy.ECS.Entity target, System.Diagnostics.Stopwatch sw)
+    {
+        sw.Restart();
+        for (int i = 0; i < entities.Length; i++)
+        {
+            manager.RemoveRelationship<RelMark>(entities[i]);
+            manager.AddRelationship<RelMark>(entities[i], target);
+        }
+        sw.Stop();
+        return sw.Elapsed.TotalMicroseconds;
+    }
+
+    private static double Plain(EntityManager manager, EntJoy.ECS.Entity[] entities, System.Diagnostics.Stopwatch sw)
+    {
+        sw.Restart();
+        for (int i = 0; i < entities.Length; i++)
+        {
+            manager.RemoveComponent<C>(entities[i]);
+            manager.AddComponent<C>(entities[i], default);
+        }
+        sw.Stop();
+        return sw.Elapsed.TotalMicroseconds;
     }
 }
 
 public struct A : IComponentData { public int Value; }
 public struct B : IComponentData { public int Value; }
 public struct C : IComponentData { public int Value; }
+public struct Flag : IEnableableComponent { public int Value; }
+public struct Material : ISharedComponentData { public int Value; }
+public struct RelMark : IRelationComponent, IComponentData { public RelationSlot Target; }
 public struct Enabled : IComponentData, IEnableableComponent { }
 public struct Enabled2 : IComponentData, IEnableableComponent { }
 
@@ -483,6 +605,18 @@ public class SystemComparison
     private UpdateThree updateThree;
     private UpdateTwoCount updateTwoCount;
     private UpdateThreeCount updateThreeCount;
+    // 稀疏随机访问基准用：按创建顺序存下句柄，逐次按句柄取组件。
+    private EntJoy.ECS.Entity[] entRandom;
+    private Arch.Core.Entity[] archRandom;
+    // enableable 启停基准用：独立世界，避免给其它臂的原型多加一条启用位图。
+    private EntWorld enabledWorld;
+    private EntJoy.ECS.Entity[] enabledEntities;
+    // shared 过滤基准用：独立世界，带 shared 列的查询无法走块表快路径。
+    private EntWorld sharedWorld;
+    private EntWorld changedWorld;
+    private EntWorld cleanWorld;
+    private EntWorld relWorld;
+    private EntJoy.ECS.Entity relTarget;
 
     // 只累计实体数、不读写组件：与 EntJoy 的 query-movenext 同口径，用于拆分枚举开销与体开销。
     public struct UpdateTwoCount : IForEach<A, B>
@@ -558,7 +692,7 @@ public class SystemComparison
     [GlobalSetup]
     public void Setup()
     {
-        ent = new EntWorld("comparison");
+        ent = new EntWorld("comparison", threadSafe: false);
         arch = ArchWorld.Create();
         Type[] types = Components == 2
             ? new Type[] { typeof(A), typeof(B) }
@@ -569,6 +703,8 @@ public class SystemComparison
         query = new QueryDescription { All = archTypes };
         entQuery = Components == 2 ? new QueryBuilder().WithAll<A, B>() : new QueryBuilder().WithAll<A, B, C>();
         arch.Reserve(archTypes, EntityCount);
+        entRandom = new EntJoy.ECS.Entity[EntityCount];
+        archRandom = new Arch.Core.Entity[EntityCount];
         for (int i = 0; i < EntityCount; i++)
         {
             var e = ent.EntityManager.NewEntity(types);
@@ -577,9 +713,41 @@ public class SystemComparison
             var a = arch.Create(archTypes);
             arch.Set(a, new B { Value = 1 });
             if (Components == 3) arch.Set(a, new C { Value = 2 });
+            entRandom[i] = e;
+            archRandom[i] = a;
         }
         entCachedQuery = ent.GetOrCreateEntityQuery(entQuery);
         archCachedQuery = arch.Query(in query);
+        enabledWorld = new EntWorld("enabled", threadSafe: false);
+        enabledEntities = new EntJoy.ECS.Entity[EntityCount];
+        for (int i = 0; i < EntityCount; i++)
+            enabledEntities[i] = enabledWorld.EntityManager.NewEntity(typeof(A), typeof(Flag));
+        sharedWorld = new EntWorld("shared", threadSafe: false);
+        for (int i = 0; i < EntityCount; i++)
+        {
+            var e = sharedWorld.EntityManager.NewEntity(typeof(A), typeof(B), typeof(Material), typeof(Flag));
+            // 全部同值、全部启用：两条过滤臂都命中全部实体，与被测的不过滤臂工作量相同。
+            sharedWorld.EntityManager.SetSharedComponent(e, new Material { Value = 1 });
+        }
+        // 变更过滤两臂：changedWorld 逐实体写一次 A 把变更位点亮（全命中），cleanWorld 清掉（全不命中）。
+        changedWorld = new EntWorld("changed", threadSafe: false);
+        cleanWorld = new EntWorld("clean", threadSafe: false);
+        for (int i = 0; i < EntityCount; i++)
+        {
+            var changedEntity = changedWorld.EntityManager.NewEntity(typeof(A), typeof(B));
+            changedWorld.EntityManager.Set(changedEntity, new A { Value = 1 });
+            cleanWorld.EntityManager.NewEntity(typeof(A), typeof(B));
+        }
+        cleanWorld.EntityManager.ClearAllChangedBitMasks();
+        // 关系过滤世界：全部实体指向同一个目标，过滤臂命中全部实体。
+        relWorld = new EntWorld("relation", threadSafe: false);
+        relTarget = relWorld.EntityManager.NewEntity(typeof(A));
+        for (int i = 0; i < EntityCount; i++)
+        {
+            // 同一批实体同时供纯关系过滤与「启用位+关系」组合过滤使用，全部启用。
+            var e = relWorld.EntityManager.NewEntity(typeof(A), typeof(B), typeof(Flag), typeof(RelMark));
+            relWorld.EntityManager.AddRelationship<RelMark>(e, relTarget);
+        }
         EntJoy();
         VerifyEnt(1);
         Arch();
@@ -590,12 +758,30 @@ public class SystemComparison
         VerifyArch(2);
         EntJoyJobCSharp();
         VerifyEnt(3);
-        var entry = Components == 2 ? "Get_SharpNative_Job__global_namespace__EntUpdateTwoCpp_Execute_AdapterPtr" : "Get_SharpNative_Job__global_namespace__EntUpdateThreeCpp_Execute_AdapterPtr";
-        if (NativeJobScheduler.GetNativeExportPtr(entry) == IntPtr.Zero) throw new InvalidOperationException("Native job export missing: " + entry);
-        EntJoyJobCpp();
-        VerifyEnt(4);
-        EntJoyEmptyJobCpp();
-        VerifyEnt(4);
+        // 原生核与当前 C# 布局指纹不一致时跳过 C++ 验证；托管臂不依赖原生核，照常可测。
+        if (TryPrepareNativeJobs())
+        {
+            EntJoyJobCpp();
+            VerifyEnt(4);
+            EntJoyEmptyJobCpp();
+            VerifyEnt(4);
+        }
+    }
+
+    private bool TryPrepareNativeJobs()
+    {
+        var entry = Components == 2
+            ? "Get_SharpNative_Job__global_namespace__EntUpdateTwoCpp_Execute_AdapterPtr"
+            : "Get_SharpNative_Job__global_namespace__EntUpdateThreeCpp_Execute_AdapterPtr";
+        try
+        {
+            return NativeJobScheduler.GetNativeExportPtr(entry) != IntPtr.Zero;
+        }
+        catch (InvalidOperationException)
+        {
+            Console.Error.WriteLine("[ab-pair] native kernels unavailable; C++ job arms are skipped");
+            return false;
+        }
     }
 
     public void VerifyEnt(int iterations)
@@ -794,6 +980,165 @@ public class SystemComparison
         else EntJoyThree();
     }
 
+    // 带 shared 过滤的实体级遍历：过滤条件在块粒度。
+    public void EntJoyShared()
+    {
+        int sum = 0;
+        foreach (var result in sharedWorld.Query<A, B>().WithShared(new Material { Value = 1 }))
+            sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
+        _abSink += sum;
+    }
+
+    // sharedWorld 的不过滤基线：同世界对比，排除分配位置与 archetype 数量的影响。
+    public void EntJoySharedBase()
+    {
+        int sum = 0;
+        foreach (var result in sharedWorld.Query<A, B>())
+            sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
+        _abSink += sum;
+    }
+
+    // 关系过滤的实体级遍历：逐实体比对关系目标，全部指向同一目标。
+    public void EntJoyRelationship()
+    {
+        int sum = 0;
+        foreach (var result in relWorld.Query<A, B>().WithRelationship<RelMark>(relTarget))
+            sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
+        _abSink += sum;
+    }
+
+    // relWorld 的不过滤基线。
+    public void EntJoyRelationshipBase()
+    {
+        int sum = 0;
+        foreach (var result in relWorld.Query<A, B>())
+            sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
+        _abSink += sum;
+    }
+
+    // 启用位与关系同时过滤：两个条件都命中全部实体（与纯关系臂共用同一世界）。
+    public void EntJoyRelationshipEnabled()
+    {
+        int sum = 0;
+        foreach (var result in relWorld.Query<A, B>().WithEnabled<Flag>().WithRelationship<RelMark>(relTarget))
+            sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
+        _abSink += sum;
+    }
+
+    // 带启用位过滤的实体级遍历：过滤条件在逐实体粒度。
+    public void EntJoyEnabled()
+    {
+        int sum = 0;
+        foreach (var result in sharedWorld.Query<A, B>().WithEnabled<Flag>())
+            sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
+        _abSink += sum;
+    }
+
+    // 变更过滤全命中：每个块都有实体被改过。
+    public void EntJoyChanged()
+    {
+        int sum = 0;
+        foreach (var result in changedWorld.Query<A, B>().WithChanged<A>())
+            sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
+        _abSink += sum;
+    }
+
+    // 变更过滤全不命中：所有块都干净，只付块级判定的成本。
+    public void EntJoyChangedNone()
+    {
+        int sum = 0;
+        foreach (var result in cleanWorld.Query<A, B>().WithChanged<A>())
+            sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
+        _abSink += sum;
+    }
+
+    // 两个变更世界各自的不过滤基线：同世界对比，排除内存分配位置的影响。
+    public void EntJoyChangedBase()
+    {
+        int sum = 0;
+        foreach (var result in changedWorld.Query<A, B>())
+            sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
+        _abSink += sum;
+    }
+
+    public void EntJoyCleanBase()
+    {
+        int sum = 0;
+        foreach (var result in cleanWorld.Query<A, B>())
+            sum += result.Comp0.Value + result.ReadOnlyComp1.Value;
+        _abSink += sum;
+    }
+
+
+    // enableable 组件启停：逐实体翻转一次，不涉及观察者与 Job。
+    public unsafe void EntJoyEnabledToggle()
+    {
+        var em = enabledWorld.EntityManager;
+        var entities = enabledEntities;
+        for (int i = 0; i < entities.Length; i++) em.SetComponentEnabled<Flag>(entities[i], (i & 1) == 0);
+    }
+
+    // 稀疏随机访问：按实体句柄逐次写组件值。两侧都是「设置已有组件的值」这一个语义。
+    public unsafe void EntJoyRandomSet()
+    {
+        var em = ent.EntityManager;
+        var entities = entRandom;
+        for (int i = 0; i < entities.Length; i++) em.Set(entities[i], new A { Value = i });
+    }
+
+    public unsafe void ArchRandomSet()
+    {
+        var entities = archRandom;
+        for (int i = 0; i < entities.Length; i++) arch.Set(entities[i], new A { Value = i });
+    }
+
+    // 定位表直落的写入入口：与 Set<T> 是同一语义的另一个公开面。
+    public unsafe void EntJoyRandomSetComponent()
+    {
+        var em = ent.EntityManager;
+        var entities = entRandom;
+        for (int i = 0; i < entities.Length; i++) em.SetComponent(entities[i], new A { Value = i });
+    }
+
+    // 稀疏随机访问：按实体句柄逐次取组件。lookup 缓存上次原型与块基址，直取每次都从实体表重新解析定位。
+    public unsafe void EntJoyRandomGet()
+    {
+        var lookup = ent.EntityManager.GetComponentLookup<A>();
+        int sum = 0;
+        var entities = entRandom;
+        for (int i = 0; i < entities.Length; i++) sum += lookup[entities[i]].Value;
+        _abSink += sum;
+    }
+
+    public unsafe void EntJoyRandomGetDirect()
+    {
+        var em = ent.EntityManager;
+        int sum = 0;
+        var entities = entRandom;
+        for (int i = 0; i < entities.Length; i++) sum += em.GetComponent<A>(entities[i]).Value;
+        _abSink += sum;
+    }
+
+    public unsafe void ArchRandomGet()
+    {
+        int sum = 0;
+        var entities = archRandom;
+        for (int i = 0; i < entities.Length; i++) sum += arch.Get<A>(entities[i]).Value;
+        _abSink += sum;
+    }
+
+    // Chunk 级查询视图：指针访问，循环体交给 JIT 自动向量化。
+    public unsafe void EntJoyChunksTwo()
+    {
+        foreach (var chunk in ent.Query<A, B>().Chunks())
+        {
+            var a = chunk.Span<A>();
+            var b = chunk.Span<B>();
+            for (int i = 0; i < a.Length; i++)
+                a[i].Value += b[i].Value;
+        }
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void EntJoyTwo()
     {
@@ -870,6 +1215,80 @@ public class SystemComparison
     {
         if (Components == 2) EntJoyChunkTwo();
         else EntJoyChunkThree();
+    }
+
+    // 回调形态：两组件用手写实现，三组件走 chunk 查询生成器展开的同名方法。
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public void EntJoyChunkForEach()
+    {
+        if (Components == 2)
+        {
+            var body = default(AddTwoBody);
+            ent.QueryChunks<A, B>().ForEach(ref body);
+        }
+        else
+        {
+            var body = default(AddThreeBody);
+            ent.QueryChunks<A, B, C>().ForEach(ref body);
+        }
+    }
+
+    private struct AddTwoBody : EntJoy.ECS.IEntityForEach<A, B>
+    {
+        public void Execute(ref A c0, ref B c1)
+        {
+            var value = c0;
+            value.Value += c1.Value;
+            c0 = value;
+        }
+    }
+
+    private struct AddThreeBody : EntJoy.ECS.IEntityForEach<A, B, C>
+    {
+        public void Execute(ref A c0, ref B c1, ref C c2)
+        {
+            var value = c0;
+            value.Value += c1.Value + c2.Value;
+            c0 = value;
+        }
+    }
+
+    // 原地读写，不做局部拷贝：与回调体同一表达式，用来分出形态开销与拷贝开销。
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public void EntJoyQueryInPlace()
+    {
+        foreach (var item in ent.Query<A, B>()) item.Comp0.Value += item.ReadOnlyComp1.Value;
+    }
+
+    // 与 EntJoyTwo/UpdateTwo 相同的拷贝体，放在块循环里：把「体形」与「循环形态」的开销分开。
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public void EntJoyChunkCopyBody()
+    {
+        foreach (var chunk in ent.QueryChunks<A, B>())
+        {
+            var a = chunk.GetSpan0();
+            var b = chunk.GetReadOnlySpan1();
+            for (int i = 0; i < a.Length; i++)
+            {
+                ref A target = ref a[i];
+                var value = target;
+                value.Value += b[i].Value;
+                target = value;
+            }
+        }
+    }
+
+    // 带循环依赖的块体：JIT 无法向量化，用于量标量下限。
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public void EntJoyChunkScalar()
+    {
+        foreach (var chunk in ent.QueryChunks<A, B>())
+        {
+            var a = chunk.GetSpan0();
+            var b = chunk.GetReadOnlySpan1();
+            int sum = 0;
+            for (int i = 0; i < a.Length; i++) { sum += a[i].Value + b[i].Value; a[i].Value = sum; }
+        }
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -1089,7 +1508,9 @@ public class SystemComparison
             {
                 var a = (A*)chunk.GetComponentArrayPointer(aIndex);
                 var b = (B*)chunk.GetComponentArrayPointer(bIndex);
-                AddTwoSpans(new Span<A>(a, chunk.EntityCount), new ReadOnlySpan<B>(b, chunk.EntityCount));
+                int n = chunk.EntityCount;
+                for (int i = 0; i < n; i++)
+                    a[i].Value += b[i].Value;
             }
         }
     }
@@ -1169,6 +1590,11 @@ public class SystemComparison
     public void Cleanup()
     {
         ent.Dispose();
+        enabledWorld?.Dispose();
+        sharedWorld?.Dispose();
+        changedWorld?.Dispose();
+        cleanWorld?.Dispose();
+        relWorld?.Dispose();
         ArchWorld.Destroy(arch);
     }
 }

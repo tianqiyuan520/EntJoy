@@ -22,7 +22,7 @@ namespace NativeTranspiler.Analyzer
                 string? fnName = ident?.Name.Identifier.Text;
                 if (fnName != null)
                 {
-                    // Try TranslateMathFFunction first (has Sin/Cos/Sqrt/SLEEF cases for PascalCase names)
+                    // 先试 TranslateMathFFunction（Sin/Cos/Sqrt 等 PascalCase 名字在那里有映射）
                     string fc1 = TranslateMathFFunction(fnName, invocation);
                     if (!fc1.Contains("/* unknown") && !fc1.Contains("EntJoy::Mathematics"))
                         return fc1;
@@ -294,7 +294,7 @@ namespace NativeTranspiler.Analyzer
                     break;
                 }
 
-                // Lightweight native SIMD (no SLEEF needed)
+                // 轻量向量化：ceil/round 等直接走 n_*_ps 内建
                 case "Ceiling":
                 {
                     if (args.Count >= 1)
@@ -332,7 +332,7 @@ namespace NativeTranspiler.Analyzer
                     break;
                 }
 
-                // SLEEF transcendental functions (single-argument)
+                // 超越函数（单参数）：n_sin_ps / n_exp_ps 等，定义域由 NativeSIMD_math.h 的 _n_dom_* 统一处理
                 case "Sin":  case "Cos":  case "Tan":
                 case "Asin": case "Acos": case "Atan":
                 case "Sinh": case "Cosh": case "Tanh":
@@ -344,24 +344,24 @@ namespace NativeTranspiler.Analyzer
                         VarKind kv = _varAnalyzer.ClassifyExpression(args[0].Expression);
                         if (kv >= VarKind.Varying)
                         {
-                            string sleefFn = $"n_{methodName.ToLowerInvariant()}_ps";
-                            return $"simd_value<float>{{ {sleefFn}({v}.v) }}";
+                            string mathFn = $"n_{methodName.ToLowerInvariant()}_ps";
+                            return $"simd_value<float>{{ {mathFn}({v}.v) }}";
                         }
                         return $"std::{methodName.ToLowerInvariant()}({v})";
                     }
                     break;
                 }
 
-                // SLEEF two-argument functions
+                // 双参数函数：任一实参变化就走向量路径，常量实参按 lane 广播
                 case "Atan2":
                 {
                     if (args.Count >= 2)
                     {
                         string a = TranslateExpression(args[0].Expression);
                         string b = TranslateExpression(args[1].Expression);
-                        VarKind kv = _varAnalyzer.ClassifyExpression(args[0].Expression);
-                        if (kv >= VarKind.Varying)
-                            return $"simd_value<float>{{ n_atan2_ps({a}.v, {b}.v) }}";
+                        if (_varAnalyzer.ClassifyExpression(args[0].Expression) >= VarKind.Varying
+                            || _varAnalyzer.ClassifyExpression(args[1].Expression) >= VarKind.Varying)
+                            return $"simd_value<float>{{ n_atan2_ps({SimdFloatArg(args[0].Expression, a)}, {SimdFloatArg(args[1].Expression, b)}) }}";
                         return $"std::atan2({a}, {b})";
                     }
                     break;
@@ -372,9 +372,9 @@ namespace NativeTranspiler.Analyzer
                     {
                         string a = TranslateExpression(args[0].Expression);
                         string b = TranslateExpression(args[1].Expression);
-                        VarKind kv = _varAnalyzer.ClassifyExpression(args[0].Expression);
-                        if (kv >= VarKind.Varying)
-                            return $"simd_value<float>{{ n_pow_ps({a}.v, {b}.v) }}";
+                        if (_varAnalyzer.ClassifyExpression(args[0].Expression) >= VarKind.Varying
+                            || _varAnalyzer.ClassifyExpression(args[1].Expression) >= VarKind.Varying)
+                            return $"simd_value<float>{{ n_pow_ps({SimdFloatArg(args[0].Expression, a)}, {SimdFloatArg(args[1].Expression, b)}) }}";
                         return $"std::pow({a}, {b})";
                     }
                     break;
@@ -396,6 +396,13 @@ namespace NativeTranspiler.Analyzer
             call += ")";
             return call;
         }
+
+        /// <summary>把 MathF 的双参调用实参转成 <c>simd_value&lt;float&gt;</c> 的寄存器表达式：
+        /// 变化实参取其寄存器，常量实参按 lane 广播。</summary>
+        private string SimdFloatArg(ExpressionSyntax expr, string translated)
+            => _varAnalyzer.ClassifyExpression(expr) >= VarKind.Varying
+                ? $"{translated}.v"
+                : $"simd_value<float>::broadcast({translated}).v";
 
         /// <summary>取被调用方法名（`X.M(...)` 或 `M(...)`）。</summary>
         private static string InvocationName(ExpressionSyntax expr) => expr switch

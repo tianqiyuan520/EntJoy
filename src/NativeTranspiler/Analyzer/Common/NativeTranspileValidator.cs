@@ -30,8 +30,8 @@ namespace NativeTranspiler.Analyzer
         public static readonly DiagnosticDescriptor ManagedSharedComponentError = new("NT014", "Managed shared component access", "[NativeTranspile] GetSharedComponent<{0}>() cannot access managed shared component type. Only blittable shared components can be accessed in [NativeTranspile] jobs. Use C# main thread or job struct field capture instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor ManagedEventTypeError = new("NT015", "Managed event type", "[NativeTranspile] SendEvent<{0}>(): event type must be unmanaged (blittable). Managed types are not supported in native jobs. Use a blittable signal struct instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor UnsupportedStructLayoutError = new("NT016", "Unsupported struct layout for ISPC", "[NativeTranspile] struct '{0}' uses {1} which ISPC cannot represent (ISPC does not support #pragma pack); NativeArray<{0}> layout would misalign. Use Sequential default layout (no Pack < 8, no Explicit).", "NativeTranspiler", DiagnosticSeverity.Error, true);
-        public static readonly DiagnosticDescriptor MultiRelationAccessError = new("NT017", "Multi-relation access in native job", "[NativeTranspile] '{0}' cannot access [MultiRelation] relation type '{1}'. Multi-relation data is stored in managed lists on the main thread and is not readable from native jobs. Use C# main-thread code or a single-value relation column instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
-        public static readonly DiagnosticDescriptor VectorizeRequiresChunkOrEntityError = new("NT018", "AutoSIMD.Vectorize requires IJobChunk/IJobEntity", "[NativeTranspile] struct '{0}' sets AutoSIMD = Vectorize but is not an IJobChunk/IJobEntity; the Vectorize path is only implemented for those two, so the flag is silently dropped. Use AutoSIMD = Enabled for IJobParallelFor/IJobFor/IJob.", "NativeTranspiler", DiagnosticSeverity.Error, true);
+        public static readonly DiagnosticDescriptor MultiRelationAccessError = new("NT017", "Multi-relation access in native job", "[NativeTranspile] '{0}' cannot access [RelationshipComponent(Multiple = true)] relation type '{1}'. Multi-relation data is stored in managed lists on the main thread and is not readable from native jobs. Use main-thread APIs, an owned target copy, or a fixed-capacity relationship column.", "NativeTranspiler", DiagnosticSeverity.Error, true);
+
         public static readonly DiagnosticDescriptor AutoSimdRequiresCppBackendError = new("NT019", "AutoSIMD requires Cpp backend", "[NativeTranspile] struct '{0}' sets AutoSIMD = Enabled together with Target = Ispc; the ISPC backend never reads AutoSIMD (it vectorizes via foreach/gang), so the flag is silently dropped. Drop AutoSIMD, or switch Target to Cpp.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor MathPrecisionRequiresCppBackendError = new("NT020", "MathPrecision requires Cpp backend", "[NativeTranspile] struct '{0}' sets MathPrecision but Target is not Cpp; per-job precision is emitted as a '#define SIMD_MATH_PRECISION' only into the C++ translation unit. ISPC precision is controlled by IspcMathLib instead.", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
@@ -51,9 +51,9 @@ namespace NativeTranspiler.Analyzer
         public static readonly DiagnosticDescriptor GeneratedEcsCouplingWarning = new("NT030", "Generated bindings couple to EntJoy.ECS", "NativeTranspiler generated bindings reference ECS symbols ({0}) while this compilation does not reference EntJoy.ECS. Either a generator emission point lost its conditional guard, or your own types use these names.", "NativeTranspiler", DiagnosticSeverity.Warning, true);
         public static readonly DiagnosticDescriptor CppMathLibRequiresCppBackendError = new("NT021", "CppMathLib requires Cpp backend", "[NativeTranspile] struct '{0}' sets CppMathLib = fast but Target is not Cpp; that flag only controls the /fp:fast compilation unit split for C++ jobs.", "NativeTranspiler", DiagnosticSeverity.Error, true);
         public static readonly DiagnosticDescriptor UseIspcMtRequiresIspcBackendError = new("NT022", "UseISPC_MT requires Ispc backend", "[NativeTranspile] struct '{0}' sets UseISPC_MT but Target is not Ispc; the multi-task ISPC variant is only generated for the ISPC backend.", "NativeTranspiler", DiagnosticSeverity.Error, true);
-
-        /// <summary>F-6：SimdMathPrecision.High 没有实现（产物与 IEEE 逐字相同），不能让人以为拿到了更快的 1.0ULP 路径。</summary>
-        public static readonly DiagnosticDescriptor SimdMathPrecisionHighUnimplementedWarning = new("NT023", "SimdMathPrecision.High has no SIMD implementation", "[NativeTranspile] struct '{0}' sets MathPrecision = High, but only Fastest has a SIMD implementation (the Sleef polynomials were removed): the emitted code is identical to MathPrecision = IEEE. Use Fastest for the AVX2/AVX512 inline polynomial, or IEEE to state the intent explicitly.", "NativeTranspiler", DiagnosticSeverity.Warning, true);
+        public static readonly DiagnosticDescriptor IspcMtEntityUnsupportedError = new("NT037", "IJobEntity does not support UseISPC_MT", "[NativeTranspile] struct '{0}' is an IJobEntity with UseISPC_MT: the multi-task ISPC variant is not generated for entity jobs, so the job registers symbols that never exist and fails at load time. Drop UseISPC_MT, or convert the job to IJobChunk.", "NativeTranspiler", DiagnosticSeverity.Error, true);
+        /// <summary>chunk 级作业已弃用 UseISPC_MT。</summary>
+        public static readonly DiagnosticDescriptor IspcMtChunkUnsupportedError = new("NT038", "IJobChunk does not support UseISPC_MT", "[NativeTranspile] struct '{0}' is an IJobChunk with UseISPC_MT, which is deprecated: chunk-level parallelism already comes from the scheduler across chunks, and a single chunk (16 KiB, hundreds of entities) is far below a sensible ISPC task grain — nesting a second thread pool inside each chunk both risks deadlock and measured 70-80x slower. Drop UseISPC_MT; for more parallelism use ScheduleWithWorkerCapAndRangeSize and let the scheduler split ranges.", "NativeTranspiler", DiagnosticSeverity.Error, true);
 
         /// <summary>F-2 / B3：AutoSIMD.Enabled 在 IJobParallelFor/IJobFor/IJob 上实测无收益（更慢）⇒
         /// 默认 error，要开必须显式声明"我已量过"（MSBuild 属性 <c>EntJoyAutoSimdMeasured=true</c>，
@@ -202,7 +202,7 @@ namespace NativeTranspiler.Analyzer
                 }
             }
 
-            // NT-05：只有 error 才算校验失败。NT023/NT024（事实告知类 warning）不得把 job 判成
+            // NT-05：只有 error 才算校验失败。NT028/NT032（事实告知类 warning）不得把 job 判成
             // "无效" —— 文档 末尾承诺「warning 不阻断生成」，而调用方（NativeTranspilerGenerator）
             // 用返回值决定是否把 job 摘出 validJobs，返回 true 却被摘掉会直接吞掉 Schedule 绑定（CS0103 + NT028）。
             return !diagnostics.Any(d => d.Severity == DiagnosticSeverity.Error);
@@ -257,8 +257,8 @@ namespace NativeTranspiler.Analyzer
                 {
                     diagnostics.Add(Diagnostic.Create(InvalidJobEntityError, executeMethod.Locations.FirstOrDefault(), structSymbol.Name));
                 }
-                // 托管列表模式多值关系（[MultiRelation] 无 MaxSlots）不占 chunk 列 → IJobEntity 无法读取；
-                // 定长多槽列模式（[MultiRelation(MaxSlots=N)]）占列，Job 可读，不拦截。
+                // 托管列表模式多值关系（[RelationshipComponent(Multiple = true)] 无 MaxTargets）不占 chunk 列 → IJobEntity 无法读取；
+                // 定长多槽列模式（[RelationshipComponent(MaxTargets=N)]）占列，Job 可读，不拦截。
                 foreach (var p in executeMethod.Parameters)
                 {
                     if (IsManagedMultiRelationType(p.Type, compilation))
@@ -266,21 +266,22 @@ namespace NativeTranspiler.Analyzer
                     else if (IsRelationComponentType(p.Type) && (p.RefKind == RefKind.Ref || p.RefKind == RefKind.Out))
                         diagnostics.Add(Diagnostic.Create(RelationshipWriteError, p.Locations.FirstOrDefault(), executeMethod.Name, p.Type.ToDisplayString()));
                 }
+                // IJobEntity 的 ISPC 路径按 chunk 级调度只发一次实体循环，没有多任务变体：
+                // 组合 UseISPC_MT 会绑定到不存在的导出，等到加载期才报符号缺失，这里提前拒掉。
+                if (AttributeHelper.HasUseISPC_MT(structSymbol, attrSymbol)
+                    && target == NativeTranspiler.BackendTarget.Ispc)
+                {
+                    diagnostics.Add(Diagnostic.Create(IspcMtEntityUnsupportedError,
+                        structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
+                }
             }
             else
             {
                 // 属性组合校验（C2）
-                // 落到 else if (IsParallelForJob || IsForJob) / 兜底分支，Vectorize 被静默丢弃，
-                // 用户以为开了向量化其实没有。这里直接报错而不是放任。
                 var attrSymbol = compilation.GetTypeByMetadataName("NativeTranspiler.NativeTranspileAttribute");
                 var target = AttributeHelper.GetBackendTarget(structSymbol, attrSymbol);
                 var autoSimd = AttributeHelper.GetAutoSIMD(structSymbol, attrSymbol);
 
-                if (autoSimd == NativeTranspiler.AutoSIMD.Vectorize && !isChunkJob && !isEntityJob)
-                {
-                    diagnostics.Add(Diagnostic.Create(VectorizeRequiresChunkOrEntityError,
-                        structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
-                }
                 // AutoSIMD.Enabled 是 Cpp 后端专有：ISPC 路径用 foreach/gang 自带向量化，
                 // 该标志在 ISPC 下无任何读取点（静默丢弃）。
                 if (autoSimd == NativeTranspiler.AutoSIMD.Enabled && target == NativeTranspiler.BackendTarget.Ispc)
@@ -309,14 +310,16 @@ namespace NativeTranspiler.Analyzer
                     diagnostics.Add(Diagnostic.Create(UseIspcMtRequiresIspcBackendError,
                         structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
                 }
-                // F-6：High 没有实现（NativeSIMD_math.h 的 == 2 分支为空）⇒ 产物与 IEEE 相同。
-                // 只警告不报错：行为不错，但名字会误导（有人以为它比 Fastest 更精确且仍向量化）。
-                if (AttributeHelper.GetMathPrecision(structSymbol, attrSymbol) == NativeTranspiler.SimdMathPrecision.High
-                    && target == NativeTranspiler.BackendTarget.Cpp)
+                // chunk 级并行度由调度器提供；chunk 内再开 ISPC 任务只会与外层线程池嵌套。
+                if (AttributeHelper.HasUseISPC_MT(structSymbol, attrSymbol)
+                    && isChunkJob && target == NativeTranspiler.BackendTarget.Ispc)
                 {
-                    diagnostics.Add(Diagnostic.Create(SimdMathPrecisionHighUnimplementedWarning,
+                    diagnostics.Add(Diagnostic.Create(IspcMtChunkUnsupportedError,
                         structSymbol.Locations.FirstOrDefault(), structSymbol.Name));
                 }
+                // 精度档对向量段与标量段同时生效：标量段经 EJ_* 在 Fastest/High 走内联内核，
+                // IEEE 才调 libm（NativeSIMD_math.h 的 SIMD_MATH_PRECISION 分派）。因此不存在
+                // “设了 MathPrecision 但没生效”的形态，无需诊断。
                 // F-2 / B3：AutoSIMD.Enabled 在本 job 形态上实测无收益（详见描述）⇒ 默认 error；
                 // 显式声明"我已量过"（EntJoyAutoSimdMeasured=true）才放行。
                 if (autoSimd == NativeTranspiler.AutoSIMD.Enabled && !isChunkJob && !isEntityJob && !autoSimdMeasured)
@@ -417,7 +420,7 @@ namespace NativeTranspiler.Analyzer
                     diagnostics.Add(Diagnostic.Create(AutoSimdFallsBackToPerLaneError,
                         executeMethod.Locations.FirstOrDefault() ?? structSymbol.Locations.FirstOrDefault(),
                         structSymbol.Name, NativeTranspiler.AutoSIMD.Enabled,
-                        "IJobEntity AutoSIMD.Enabled emits a scalar entity body; use Disabled or Vectorize"));
+                        "IJobEntity AutoSIMD.Enabled emits a scalar entity body; use Disabled"));
             }
 
             // B3（①）：AutoSIMD 开着、但 body 命中发射侧"不可向量化"判据 ⇒ 整个 body 退回 per-lane
@@ -442,9 +445,8 @@ namespace NativeTranspiler.Analyzer
                                 semanticModelSimd.GetSymbolInfo(identifier).Symbol is IParameterSymbol parameter
                                 && parameter.Type.ToDisplayString() == Config.TypeChunkEnabledMask))
                             diagnostics.Add(Diagnostic.Create(AutoSimdFallsBackToPerLaneError, executeMethod.Locations.FirstOrDefault(),
-                                structSymbol.Name, autoSimdBody, "explicit ChunkEnabledMask access requires the scalar or compiler Vectorize path"));
-                        else if (SimdVectorizability.HasNonVectorizableCall(methodSyntax.Body, varAnalyzer, out var reason,
-                            compilerVectorize: autoSimdBody == NativeTranspiler.AutoSIMD.Vectorize))
+                                structSymbol.Name, autoSimdBody, "explicit ChunkEnabledMask access is only supported on the scalar path; use AutoSIMD = Disabled"));
+                        else if (SimdVectorizability.HasNonVectorizableCall(methodSyntax.Body, varAnalyzer, out var reason))
                         {
                             diagnostics.Add(Diagnostic.Create(AutoSimdFallsBackToPerLaneError,
                                 executeMethod.Locations.FirstOrDefault() ?? structSymbol.Locations.FirstOrDefault(),
@@ -517,36 +519,39 @@ namespace NativeTranspiler.Analyzer
             type.SpecialType == SpecialType.System_Void || IsUnmanagedType(type);
 
         /// <summary>
-        /// 判断类型是否为 [MultiRelation] 关系组件（实现 EntJoy.ECS.IRelationComponent 且标记 MultiRelationAttribute）。
+        /// 判断关系声明是否通过 Multiple 或 MaxTargets 启用多目标。
         /// 分析器不引用 EntJoy.ECS 程序集，通过 MetadataName + 特性名匹配识别。
         /// </summary>
         public static bool IsMultiRelationType(ITypeSymbol type, Compilation compilation)
         {
             if (type is not INamedTypeSymbol namedType || namedType.TypeKind != TypeKind.Struct) return false;
             if (!namedType.AllInterfaces.Any(i => i.ToDisplayString() == Config.TypeIRelationComponent)) return false;
-            return namedType.GetAttributes().Any(ad => ad.AttributeClass?.ToDisplayString() == Config.TypeMultiRelationAttribute);
+            return namedType.GetAttributes().Any(ad =>
+                ad.AttributeClass?.ToDisplayString() == Config.TypeRelationshipComponentAttribute &&
+                ad.NamedArguments.Any(arg => (arg.Key == "Multiple" && arg.Value.Value is true)
+                    || (arg.Key == "MaxTargets" && arg.Value.Value is int capacity && capacity > 0)));
         }
 
         public static bool IsRelationComponentType(ITypeSymbol type) =>
             type.AllInterfaces.Any(value => value.ToDisplayString() == Config.TypeIRelationComponent);
 
         /// <summary>
-        /// 判断是否为「托管列表模式」多值关系（[MultiRelation] 且未指定 MaxSlots 或 MaxSlots &lt; 2）。
+        /// 判断是否为「托管列表模式」多值关系（[RelationshipComponent(Multiple = true)] 且未指定 MaxTargets 或 MaxTargets &lt; 2）。
         /// 托管模式数据在 EntityManager 托管列表，不进 chunk 列 → Job 不可读，需 NT017 拦截。
-        /// 定长多槽列模式（MaxSlots ≥ 2）占 chunk 列，Job 可读，不拦截。
+        /// 定长多槽列模式（MaxTargets ≥ 2）占 chunk 列，Job 可读，不拦截。
         /// </summary>
         public static bool IsManagedMultiRelationType(ITypeSymbol type, Compilation compilation)
         {
             if (!IsMultiRelationType(type, compilation)) return false;
             foreach (var attr in type.GetAttributes())
             {
-                if (attr.AttributeClass?.ToDisplayString() != Config.TypeMultiRelationAttribute) continue;
+                if (attr.AttributeClass?.ToDisplayString() != Config.TypeRelationshipComponentAttribute) continue;
                 foreach (var namedArg in attr.NamedArguments)
                 {
-                    if (namedArg.Key == "MaxSlots" && namedArg.Value.Value is int v && v >= 2)
+                    if (namedArg.Key == "MaxTargets" && namedArg.Value.Value is int v && v >= 2)
                         return false;   // 定长多槽列模式 → Job 可读
                 }
-                return true;   // MaxSlots 缺失或 < 2 → 托管模式
+                return true;   // MaxTargets 缺失或 < 2 → 托管模式
             }
             return true;
         }

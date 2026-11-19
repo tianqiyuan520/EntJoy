@@ -88,16 +88,6 @@ public struct EntitySimdJob : IJobEntity {
         p.Marker = p.X * 2.0f;
     }
 }"),
-            ("07_entity_vectorize", @"
-using NativeTranspiler; using EntJoy.ECS;
-public struct LSnapD { public float X; public float Marker; }
-[NativeTranspile(AutoSIMD = AutoSIMD.Vectorize)]
-public struct EntityVecJob : IJobEntity {
-    public void Execute(ref LSnapD p) {
-        if (p.X < 0.0f) return;
-        p.Marker = p.X * 2.0f;
-    }
-}"),
             ("08_ijob_autosimd", @"
 using NativeTranspiler; using EntJoy.JobSystem; using EntJoy.Collections;
 [NativeTranspile(AutoSIMD = AutoSIMD.Enabled)]

@@ -33,7 +33,9 @@ namespace EntJoy.ECS
             // 定位表按需扩容，不依赖调用方同步：漏扩会让超出旧容量的实体读到越界/零值。
             if ((uint)entityId >= (uint)_locateBCapacity) EnsureLocateCapacity(entityId + 1);
             {
-                Chunk chunk = archetype.ChunkList[chunkIndex];
+                // 按 ref 读块头：List 索引器会复制整个 Chunk（Meta + 计数），逐实体创建时是纯开销。
+                List<Chunk> chunks = archetype.ChunkList;
+                ref readonly Chunk chunk = ref CollectionsMarshal.AsSpan(chunks)[chunkIndex];
                 ref var loc = ref _locateB[entityId];
                 loc.ChunkMemory = (void*)chunk.MemoryBlock;
                 loc.ChunkOffsets = archetype.GetChunkOffsetsNative();

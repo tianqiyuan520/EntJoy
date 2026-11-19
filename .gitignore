@@ -78,6 +78,9 @@ imgui.ini
 !/tools/JobSystemStressTest/
 !/tools/JobSystemStressTest.CSharp/
 !/tools/ISPCWidthBoundaryTest/
+!/tools/MathUlpCheck/
+!/tools/AutoSIMDPerf/
+/tools/MathUlpCheck/build/
 !/tools/NativeTranspilerFixture/
 !/tools/RelationshipValidation/
 !/tools/SafetyInterceptProbe/

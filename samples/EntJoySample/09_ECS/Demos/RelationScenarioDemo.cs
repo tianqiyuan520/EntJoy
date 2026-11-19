@@ -7,18 +7,19 @@ namespace EntJoySample.ECS
     // 关系组件定义（四种形态）
 
     /// <summary>父子层级（默认：出边单值 + 入边多源 = 多对一）。</summary>
+    [RelationshipComponent(Hierarchy = true)]
     public struct SceneChildOf : IRelationComponent { public RelationSlot Target; }
 
     /// <summary>索敌（默认：多敌人指向同一目标 = 多对一）。</summary>
     public struct Targets : IRelationComponent { public RelationSlot Target; }
 
-    /// <summary>技能（[MultiRelation] 托管模式：角色多技能 + 技能多角色 = M:N，主线程）。</summary>
-    [MultiRelation]
+    /// <summary>技能（[RelationshipComponent(Multiple = true)] 托管模式：角色多技能 + 技能多角色 = M:N，主线程）。</summary>
+    [RelationshipComponent(Multiple = true)]
     public struct KnowsSkill : IRelationComponent { public RelationSlot Target; }
 
-    /// <summary>技能（[MultiRelation(MaxSlots=4)] 定长多槽列：M:N，Job 可读——NativeTranspiler 演示用）。
+    /// <summary>技能（[RelationshipComponent(MaxTargets=4)] 定长多槽列：M:N，Job 可读——NativeTranspiler 演示用）。
     /// 手写 4 槽字段（不经源生成器注入），隔离验证 NativeTranspiler 收集路径。</summary>
-    [MultiRelation(MaxSlots = 4)]
+    [RelationshipComponent(MaxTargets = 4)]
     public partial struct HotSkillSlot : IRelationComponent
     {
         public RelationSlot Target;
@@ -27,10 +28,9 @@ namespace EntJoySample.ECS
         public RelationSlot Slot3;
     }
 
-    /// <summary>背包持有（[MultiRelation] + [ExclusiveTarget]：角色多物品，物品唯一持有者 = 一对多）。
+    /// <summary>背包持有（[RelationshipComponent(Multiple = true, ExclusiveTarget = true)]：角色多物品，物品唯一持有者 = 一对多）。
     /// 注意：多值关系存储只有 RelationSlot（8B），关系数据（如堆叠数）应放 target 实体组件上。</summary>
-    [MultiRelation]
-    [ExclusiveTarget]
+    [RelationshipComponent(Multiple = true, ExclusiveTarget = true)]
     public struct Carries : IRelationComponent { public RelationSlot Target; }
 
     /// <summary>物品堆叠数（放物品实体组件上——ECS 数据归属原则，多值关系的额外数据不进关系存储）。</summary>
@@ -130,7 +130,7 @@ namespace EntJoySample.ECS
         /// <summary>场景 3：技能（M:N）——两角色共享技能，技能被多角色掌握。</summary>
         private static void TestSkills(EntityManager em)
         {
-            Console.WriteLine("\n--- 3. Skills (M:N via [MultiRelation]) ---");
+            Console.WriteLine("\n--- 3. Skills (M:N via [RelationshipComponent(Multiple = true)]) ---");
 
             var mage = em.NewEntity(typeof(Position));
             var knight = em.NewEntity(typeof(Position));
@@ -161,10 +161,10 @@ namespace EntJoySample.ECS
                 && em.GetRelationsOf<KnowsSkill>(fireball).SequenceEqual(new[] { mage }), "M:N clear one source");
         }
 
-        /// <summary>场景 3b：定长多槽列技能（[MultiRelation(MaxSlots=4)]）——主线程 API 演示。</summary>
+        /// <summary>场景 3b：定长多槽列技能（[RelationshipComponent(MaxTargets=4)]）——主线程 API 演示。</summary>
         private static void TestFixedSlotSkills(EntityManager em)
         {
-            Console.WriteLine("\n--- 3b. Fixed-slot Skills (M:N via [MultiRelation(MaxSlots=4)]) ---");
+            Console.WriteLine("\n--- 3b. Fixed-slot Skills (M:N via [RelationshipComponent(MaxTargets=4)]) ---");
 
             var mage = em.NewEntity(typeof(Position), typeof(HotSkillSlot));
             var knight = em.NewEntity(typeof(Position), typeof(HotSkillSlot));

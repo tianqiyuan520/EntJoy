@@ -1,10 +1,8 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-using System.Text.RegularExpressions;
 using NativeTranspiler.Analyzer.Common;
 using System;
 
@@ -21,7 +19,7 @@ namespace NativeTranspiler.Analyzer
             var boolFields = GetBoolConditionalFields(jobStruct, compilation);
 
             // 生成适配函数
-            // 纯值字段打包：结构体定义必须在本 TU 可见（适配器是独立 TU）⇒ 放在函数之前。
+            // 纯值字段打包：结构体定义必须在本 TU 可见 ⇒ 放在函数之前。
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {adapterFuncName}(void* context, int __startIndex, int __count)");
             sb.AppendLine("{");
 
@@ -106,38 +104,31 @@ namespace NativeTranspiler.Analyzer
 
             var fieldReads = new StringBuilder();
             var callArgs = new List<string>();
-            int currentOffset = 0;
 
-            foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+            foreach (var slot in BuildFieldLayout(jobStruct))
             {
-                int offset = CalculateFieldOffset(field, ref currentOffset);
-
-                if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
+                string name = slot.Field.Name;
+                string address = CppIntegerSemantics.CastOperand(
+                    CppIntegerSemantics.JobAddress("context", slot.Offset));
+                switch (slot.Kind)
                 {
-                    if (NativeTranspiler.IsEntJoyContainerNamed(field.Type, Config.NativeList))
-                    {
-                        fieldReads.AppendLine($"    auto* {field.Name}_listData = *(EntJoy::Collections::UnsafeList<{GetCppElementType(field.Type)}>**)((char*)context + {offset});");
-                        callArgs.Add($"{field.Name}_listData");
-                    }
-                    else
-                    {
-                        var cppElemType = GetCppElementType(field.Type);
-                        fieldReads.AppendLine($"    auto* {field.Name}_ptr = *({cppElemType}**)((char*)context + {offset});");
-                        fieldReads.AppendLine($"    int& {field.Name}_length = *(int*)((char*)context + {offset + 8});");
-                        callArgs.Add($"{field.Name}_ptr, {field.Name}_length");
-                    }
-                }
-                else if (field.Type is IPointerTypeSymbol)
-                {
-                    var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                    fieldReads.AppendLine($"    auto* {field.Name}_ptr = *({cppType}*)((char*)context + {offset});");
-                    callArgs.Add($"{field.Name}_ptr");
-                }
-                else
-                {
-                    var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                    fieldReads.AppendLine($"    auto* {field.Name}_ptr = ({cppType}*)((char*)context + {offset});");
-                    callArgs.Add($"{field.Name}_ptr");
+                    case FieldKind.NativeList:
+                        fieldReads.AppendLine($"    auto* {name}_listData = *(EntJoy::Collections::UnsafeList<{slot.ElementType}>**){address};");
+                        callArgs.Add($"{name}_listData");
+                        break;
+                    case FieldKind.Container:
+                        fieldReads.AppendLine($"    auto* {name}_ptr = *({slot.ElementType}**){address};");
+                        fieldReads.AppendLine($"    int& {name}_length = *(int*){CppIntegerSemantics.CastOperand(CppIntegerSemantics.JobAddress("context", slot.LengthOffset))};");
+                        callArgs.Add($"{name}_ptr, {name}_length");
+                        break;
+                    case FieldKind.Pointer:
+                        fieldReads.AppendLine($"    auto* {name}_ptr = *({slot.CppType}*){address};");
+                        callArgs.Add($"{name}_ptr");
+                        break;
+                    default:
+                        fieldReads.AppendLine($"    auto* {name}_ptr = ({slot.CppType}*){address};");
+                        callArgs.Add($"{name}_ptr");
+                        break;
                 }
             }
 

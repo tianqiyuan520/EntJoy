@@ -39,7 +39,7 @@ namespace EntJoy.ECS
                     if (!_relationIndex.TryGetSources(entry.Entity, out var byType)) continue;
                     foreach (var edges in byType)
                     {
-                        if (!forceCascade && !ComponentTypeManager.GetCascadeOnTargetDeleted(edges.Key)) continue;
+                        if (!forceCascade && !ComponentTypeManager.GetDeleteWithTarget(edges.Key)) continue;
                         foreach (var source in edges.Value)
                             if (StillPointsToRelation(source, entry.Entity, edges.Key)) stack.Push((source, false));
                     }

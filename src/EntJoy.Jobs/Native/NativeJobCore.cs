@@ -174,7 +174,8 @@ namespace EntJoy.JobSystem
         private static IntPtr _nativeTranspiledDll = IntPtr.Zero;
         private static int _shutdownRequested;
         // NativeDll 与生成内核均须匹配此 ABI（包含 ECS 逐实体过滤数据布局）。
-        private const uint ExpectedAbiVersion = 4;
+        private const uint ExpectedJobSystemAbiVersion = 4;
+        private const uint ExpectedNativeTranspiledAbiVersion = 5;
 
         internal static IntPtr NativeDllHandle => _nativeDll;
 
@@ -450,6 +451,23 @@ namespace EntJoy.JobSystem
                 throw new InvalidOperationException(
                     $"NativeTranspiled export '{entryPointName}' returned a NULL adapter pointer.");
             return adapter;
+        }
+
+        /// <summary>按名解析 NativeTranspiled 导出地址；模块不存在或导出缺失时返回 false。</summary>
+        internal static bool TryGetNativeTranspiledExport(string entryPointName, out IntPtr address)
+        {
+            address = IntPtr.Zero;
+            IntPtr handle;
+            try
+            {
+                handle = EnsureNativeTranspiledHandle();
+            }
+            catch (DllNotFoundException)
+            {
+                // 没有 NativeTranspiled 模块就没有生成内核，调用方按"无此契约"处理。
+                return false;
+            }
+            return NativeLibrary.TryGetExport(handle, entryPointName, out address);
         }
 
         /// <summary>
@@ -808,7 +826,7 @@ namespace EntJoy.JobSystem
                 return;
             }
             _jobSystem_GetAbiVersion = (delegate* unmanaged[Cdecl]<uint>)abiPtr;
-            if (_jobSystem_GetAbiVersion() != ExpectedAbiVersion)
+            if (_jobSystem_GetAbiVersion() != ExpectedJobSystemAbiVersion)
             {
                 NativeLibrary.Free(dllHandle);
                 _nativeDll = IntPtr.Zero;
@@ -970,7 +988,7 @@ namespace EntJoy.JobSystem
         {
             IntPtr handle = NativeLibrary.Load(path);
             if (!NativeLibrary.TryGetExport(handle, "NativeTranspiled_GetAbiVersion", out var abi)
-                || ((delegate* unmanaged[Cdecl]<uint>)abi)() != ExpectedAbiVersion)
+                || ((delegate* unmanaged[Cdecl]<uint>)abi)() != ExpectedNativeTranspiledAbiVersion)
             {
                 NativeLibrary.Free(handle);
                 throw new InvalidOperationException("NativeTranspiled ABI mismatch; rebuild the generated native kernels.");

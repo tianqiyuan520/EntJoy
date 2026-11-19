@@ -6,10 +6,10 @@ using Xunit;
 
 namespace EntJoy.ECS.Tests
 {
-    [MultiRelation] public struct ListLinks : IRelationComponent { public RelationSlot Target; }
-    [MultiRelation(MaxSlots = 2)] public partial struct BoundedLinks : IRelationComponent { public RelationSlot Target; }
-    [MultiRelation, ExclusiveTarget] public struct ExclusiveListLinks : IRelationComponent { public RelationSlot Target; }
-    [MultiRelation(MaxSlots = 2), ExclusiveTarget] public partial struct ExclusiveBoundedLinks : IRelationComponent { public RelationSlot Target; }
+    [RelationshipComponent(Multiple = true)] public struct ListLinks : IRelationComponent { public RelationSlot Target; }
+    [RelationshipComponent(MaxTargets = 2)] public partial struct BoundedLinks : IRelationComponent { public RelationSlot Target; }
+    [RelationshipComponent(Multiple = true, ExclusiveTarget = true)] public struct ExclusiveListLinks : IRelationComponent { public RelationSlot Target; }
+    [RelationshipComponent(MaxTargets = 2, ExclusiveTarget = true)] public partial struct ExclusiveBoundedLinks : IRelationComponent { public RelationSlot Target; }
 
     public class MultiRelationLifecycleTests
     {

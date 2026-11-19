@@ -63,7 +63,7 @@ namespace NativeTranspiler.Analyzer.Common
         public const string TypeArchetypeChunk = "EntJoy.ECS.ArchetypeChunk";
         public const string TypeEntity = "EntJoy.ECS.Entity";
         public const string TypeIRelationComponent = "EntJoy.ECS.IRelationComponent";
-        public const string TypeMultiRelationAttribute = "EntJoy.ECS.MultiRelationAttribute";
+        public const string TypeRelationshipComponentAttribute = "EntJoy.ECS.RelationshipComponentAttribute";
 
         // Attribute 名
         public const string NativeTranspileAttribute = "NativeTranspileAttribute";

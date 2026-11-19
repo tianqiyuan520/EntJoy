@@ -146,6 +146,8 @@ namespace EntJoy.ECS
 
         /// <summary>
         /// 主线程回放所有命令。无需注册，直接调用 EntityManager 的非泛型方法。
+        /// 回放前会等待所有活跃 Job 完成（<see cref="EntityManager.CompleteActiveJobs"/>），
+        /// 因此 Job 内通过 ParallelWriter 记录的命令一定可见；不足是它会等全部 Job 而非仅等生产者。
         /// </summary>
         public unsafe void Playback(EntityManager entityManager)
         {

@@ -62,7 +62,9 @@ Console.WriteLine("=== NativeTranspiler fixture: generated-code semantics (F-4 /
 GuardedElementFixture.Run();
 UserColumnFixture.Run();
 TranslationSemanticsFixture.Run();
+Uint2SimdFixture.Run();
 DifferentialTranslationFixture.Run();
+DifferentialPairFixture.Run();
 ChunkLoopBindingsFixture.Run();
 RelationshipReadFixture.Run();
 RelationshipMaskFixture.Run();

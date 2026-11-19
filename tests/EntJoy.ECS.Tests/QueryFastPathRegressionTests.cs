@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using EntJoy.ECS;
 using Xunit;
 
@@ -7,6 +8,45 @@ namespace EntJoy.ECS.Tests
     public class QueryFastPathRegressionTests
     {
         private struct ExtraColumn : IComponentData { }
+        private struct EnableFlag : IEnableableComponent { public int Value; }
+        private struct EnableGate : IEnableableComponent { public int Value; }
+
+        [Fact]
+        public void EnabledFilter_RunExtendsAcrossWordsAndSkipsEmptyWords()
+        {
+            TestBackend.EnsureInitialized();
+            using var world = new World("EnabledRunExtend");
+            var em = world.EntityManager;
+            const int n = 200;
+            var entities = new Entity[n];
+            for (int i = 0; i < n; i++)
+            {
+                entities[i] = em.NewEntity(typeof(Position), typeof(Velocity), typeof(EnableFlag), typeof(EnableGate));
+                em.Set(entities[i], new Position { X = i });
+            }
+            // 同时覆盖整字空缺、字接缝上的关闭位与单个启用位。
+            for (int i = 64; i < 192; i++) em.SetComponentEnabled<EnableFlag>(entities[i], false);
+            em.SetComponentEnabled<EnableFlag>(entities[100], true);
+            // 第二个启用位条件从 128 起关闭，与上一条位图求交。
+            for (int i = 128; i < n; i++) em.SetComponentEnabled<EnableGate>(entities[i], false);
+
+            var single = new List<int>();
+            for (int i = 0; i < n; i++) if (i < 64 || i >= 192 || i == 100) single.Add(i);
+            var visited = new List<int>();
+            foreach (var item in world.Query<Position>().WithEnabled<EnableFlag>())
+                visited.Add((int)item.ReadOnlyComp0.X);
+            Assert.Equal(single, visited);
+
+            var builder = new QueryBuilder().WithAll<Position>().WithEnabled<EnableFlag>();
+            Assert.Equal(single.Count, em.GetArchetypeQuery(builder).CalculateEntityCount());
+
+            var both = new List<int>();
+            for (int i = 0; i < n; i++) if (i < 64 || i == 100) both.Add(i);
+            visited.Clear();
+            foreach (var item in world.Query<Position, Velocity>().WithEnabled<EnableFlag>().WithEnabled<EnableGate>())
+                visited.Add((int)item.ReadOnlyComp0.X);
+            Assert.Equal(both, visited);
+        }
 
         [Theory]
         [InlineData(2)]

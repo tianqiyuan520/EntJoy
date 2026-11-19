@@ -2,8 +2,10 @@ using EntJoy.JobSystem;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 
 namespace EntJoy.ECS.JobSystem
@@ -130,9 +132,11 @@ namespace EntJoy.ECS.JobSystem
         internal static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, ChunkJobData*, int, IntPtr, int, int, int, uint, IntPtr> _jobSystem_ScheduleChunkRangeJobEx;
         internal static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, EntityBatchData*, int, IntPtr, int, int, int, int, uint, IntPtr> _jobSystem_ScheduleEntityBatchJobEx;
         internal static delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, EntityBatchData*, int, IntPtr, int, int, int, int, uint, IntPtr> _jobSystem_ScheduleAndCompleteEntityBatchJobEx;
+        private static delegate* unmanaged[Cdecl]<int> _getChunkContextHeaderSize;
 
         private static readonly object _chunkPointerLoadLock = new();
         private static int _chunkPointersLoaded;
+        private static int _reloadHookRegistered;
 
         /// <summary>
         /// 从 <see cref="NativeJobCore.NativeDllHandle"/> 加载 chunk 专属导出。
@@ -148,11 +152,106 @@ namespace EntJoy.ECS.JobSystem
                 NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleEntityBatchJobEx");
             _jobSystem_ScheduleAndCompleteEntityBatchJobEx = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, EntityBatchData*, int, IntPtr, int, int, int, int, uint, IntPtr>)
                 NativeLibrary.GetExport(dllHandle, "JobSystem_ScheduleAndCompleteEntityBatchJobEx");
+            ValidateChunkContextHeaderLayout();
         }
 
+        /// <summary>布局防御：原生侧报告 chunk 上下文头的字节数与字段指纹，与托管 <see cref="ChunkContextHeader"/> 比对。
+        /// 两边字段必须同步（原生定义在 NativeGeneratedSupport.h）。</summary>
+        private static void ValidateChunkContextHeaderLayout()
+        {
+            if (!NativeJobCore.TryGetNativeTranspiledExport("NativeTranspiled_GetChunkContextHeaderSize", out var export))
+                return;
+            _getChunkContextHeaderSize = (delegate* unmanaged[Cdecl]<int>)export;
+            int nativeSize = _getChunkContextHeaderSize();
+            int managedSize = Unsafe.SizeOf<ChunkContextHeader>();
+            if (nativeSize != managedSize)
+                throw new InvalidOperationException(
+                    $"ChunkContextHeader 布局不匹配：C++={nativeSize}B C#={managedSize}B。请同步 NativeGeneratedSupport.h 与 NativeChunkJobs.cs 字段。");
+
+            // 总大小相同、字段换序或换名时，只有指纹能发现。
+            if (!NativeJobCore.TryGetNativeTranspiledExport("NativeTranspiled_GetChunkContextHeaderLayoutFingerprint", out var fingerprintExport))
+            {
+                Console.Error.WriteLine(
+                    "[NativeTranspiled] 未找到 ChunkContextHeader 布局指纹导出，本次只校验了字节数（模块版本旧于 ABI 5）。");
+                return;
+            }
+            var getFingerprint = (delegate* unmanaged[Cdecl]<ulong>)fingerprintExport;
+            ulong nativeFingerprint = getFingerprint();
+            ulong managedFingerprint = ComputeChunkContextHeaderFingerprint();
+            if (nativeFingerprint != managedFingerprint)
+                throw new InvalidOperationException(
+                    $"ChunkContextHeader 字段布局不匹配：C++=0x{nativeFingerprint:X16} C#=0x{managedFingerprint:X16}。" +
+                    $"托管侧字段（名:偏移:宽度）={DescribeChunkContextHeaderFields()}。请同步 NativeGeneratedSupport.h 与 NativeChunkJobs.cs 字段。");
+        }
+
+        /// <summary>托管侧字段清单，供指纹失配时定位到具体字段。</summary>
+        private static string DescribeChunkContextHeaderFields()
+        {
+            var type = typeof(ChunkContextHeader);
+            var text = new StringBuilder();
+            foreach (var field in type.GetFields(BindingFlags.Public | BindingFlags.Instance))
+            {
+                if (text.Length > 0) text.Append(", ");
+                text.Append(field.Name).Append(':')
+                    .Append(Marshal.OffsetOf(type, field.Name)).Append(':')
+                    .Append(Marshal.SizeOf(field.FieldType));
+            }
+            return text.ToString();
+        }
+
+        /// <summary>字段指纹：名字 + 类型名（都忽略大小写）+ 偏移 + 宽度，FNV-1a 后按加法合成，与 C++ 侧同值。</summary>
+        internal static ulong ComputeChunkContextHeaderFingerprint()
+        {
+            ulong sum = 0;
+            var type = typeof(ChunkContextHeader);
+            foreach (var field in type.GetFields(BindingFlags.Public | BindingFlags.Instance))
+            {
+                ulong hash = LayoutFnvBasis;
+                foreach (char c in field.Name)
+                {
+                    hash ^= (byte)char.ToLowerInvariant(c);
+                    hash *= LayoutFnvPrime;
+                }
+                // 名字与类型之间夹一次空推进，与 C++ 侧一致。
+                hash *= LayoutFnvPrime;
+                foreach (char c in TypeToken(field.FieldType))
+                {
+                    if (c == ' ') continue;
+                    hash ^= (byte)c;
+                    hash *= LayoutFnvPrime;
+                }
+                hash = (hash ^ (ulong)Marshal.OffsetOf(type, field.Name)) * LayoutFnvPrime;
+                hash = (hash ^ (ulong)Marshal.SizeOf(field.FieldType)) * LayoutFnvPrime;
+                sum += hash;
+            }
+            return sum + (LayoutSalt ^ (ulong)Marshal.SizeOf(type));
+        }
+
+        /// <summary>字段类型在指纹里的拼写：与 C++ 侧宏列表逐字一致（托管类型名是 Int32/UInt32，不能直接用）。</summary>
+        private static string TypeToken(Type type) => type switch
+        {
+            _ when type == typeof(IntPtr) => "void*",
+            _ when type == typeof(int) => "int",
+            _ when type == typeof(uint) => "unsigned int",
+            _ when type == typeof(float) => "float",
+            _ when type == typeof(long) => "long long",
+            _ => type.Name.ToLowerInvariant()
+        };
+
+        private const ulong LayoutFnvBasis = 1469598103934665603UL;
+        private const ulong LayoutFnvPrime = 1099511628211UL;
+        private const ulong LayoutSalt = 0x9e3779b97f4a7c15UL;
+
+        /// <summary>热重载换了 NativeTranspiled 句柄后，重新校验 chunk 上下文头布局（导出指针取自 JobSystem 模块，不需要重取）。</summary>
+        private static void EnsureReloadHook()
+        {
+            if (Interlocked.Exchange(ref _reloadHookRegistered, 1) != 0) return;
+            NativeJobCore.RegisterReloadCallback(ValidateChunkContextHeaderLayout);
+        }
         internal static void EnsureChunkPointersLoaded()
         {
             if (Volatile.Read(ref _chunkPointersLoaded) != 0) return;
+            EnsureReloadHook();
             lock (_chunkPointerLoadLock)
             {
                 if (_chunkPointersLoaded != 0) return;

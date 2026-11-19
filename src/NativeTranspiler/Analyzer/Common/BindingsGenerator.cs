@@ -814,7 +814,7 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine($"            NativeJobHandle nativeHandle = ChunkJobScheduler.{ispcScheduleMethod}(");
                     sb.AppendLine(isEntityJob
                         ? $"                ref job, world.EntityManager, query, {ispcFuncPtr}, s_{jobStruct.Name}_RequiredComponentTypeIds, dependsOn._nativeHandle, world);"
-                        : $"                ref job, world.EntityManager, query, {ispcFuncPtr}, s_{jobStruct.Name}_RequiredComponentTypeIds, {(useMT ? "1" : "workerCap")}, dependsOn._nativeHandle, world);");
+                        : $"                ref job, world.EntityManager, query, {ispcFuncPtr}, s_{jobStruct.Name}_RequiredComponentTypeIds, workerCap, dependsOn._nativeHandle, world);");
                     sb.AppendLine($"            return new JobHandle(nativeHandle);");
                     sb.AppendLine("        }");
                     sb.AppendLine();
@@ -828,7 +828,7 @@ namespace NativeTranspiler.Analyzer
                     sb.AppendLine($"            NativeJobHandle nativeHandle = ChunkJobScheduler.{ispcScheduleMethod2}(");
                     sb.AppendLine(isEntityJob
                         ? $"                ref job, world.EntityManager, query, {ispcFuncPtr}, s_{jobStruct.Name}_RequiredComponentTypeIds, dependsOn._nativeHandle, world);"
-                        : $"                ref job, world.EntityManager, query, {ispcFuncPtr}, s_{jobStruct.Name}_RequiredComponentTypeIds, {(useMT ? "1, int.MaxValue" : "workerCap, rangeSize")}, dependsOn._nativeHandle, world);");
+                        : $"                ref job, world.EntityManager, query, {ispcFuncPtr}, s_{jobStruct.Name}_RequiredComponentTypeIds, workerCap, rangeSize, dependsOn._nativeHandle, world);");
                     sb.AppendLine($"            return new JobHandle(nativeHandle);");
                     sb.AppendLine("        }");
                     sb.AppendLine();

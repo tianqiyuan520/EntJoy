@@ -17,6 +17,17 @@ namespace EntJoy.ECS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ChunkEnumerator<T0, T1> GetEnumerator()
             => new ChunkEnumerator<T0, T1>(_entityManager, _builder);
+
+        /// <summary>按块推进、逐实体回调：不构造查询结果，循环体在块循环里展开。</summary>
+        public void ForEach<TIter>(ref TIter body) where TIter : struct, IEntityForEach<T0, T1>
+        {
+            foreach (var chunk in this)
+            {
+                var c0 = chunk.GetSpan0();
+                var c1 = chunk.GetSpan1();
+                for (int i = 0; i < c0.Length; i++) body.Execute(ref c0[i], ref c1[i]);
+            }
+        }
     }
 
     public unsafe ref struct ChunkEnumerator<T0, T1> where T0 : struct where T1 : struct

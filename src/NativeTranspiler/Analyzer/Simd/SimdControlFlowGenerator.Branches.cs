@@ -18,7 +18,7 @@ namespace NativeTranspiler.Analyzer
             var conditions = new List<string>();
             var current = stmt;
             StatementSyntax? elseBody = null;
-            string savedMask = "";
+            SimdMask savedMask = SimdMask.Empty;
             bool savedMaskEmitted = false;
             // 已处理分支的条件按顺序排除，后续分支只接收尚未命中的 lane。
             string excludedMaskVar = null;
@@ -36,12 +36,12 @@ namespace NativeTranspiler.Analyzer
                 //   Skip __cond_N, skip savedMask (all_true is redundant), go straight to __good_N.
                 if (_isUniformScalarLoop && IsSingleContinue(current.Statement))
                 {
-                    string goodExpr = $"simd_mask{{ n_not_mask(({condExpr}).m) }}";
+                    string goodExpr = $"simd_mask{{ n_not_mask({CppIntegerSemantics.MemberOperand(condExpr)}.m) }}";
                     string goodName = $"__good_{_labelCounter++}";
                     AppendLine($"simd_mask {goodName} = {goodExpr};");
                     // Combine with previous mask to narrow unfound lanes
-                    string prev = string.IsNullOrEmpty(savedMask) ? _currentMask : savedMask;
-                    if (prev != "simd_mask::all_true()")
+                    SimdMask prev = savedMask.IsEmpty ? _currentMask : savedMask;
+                    if (!prev.IsAllTrue)
                     {
                         string combined = $"simd_mask{{ n_and_mask({prev}.m, {goodName}.m) }}";
                         AppendLine($"{goodName} = {combined};");
@@ -50,9 +50,9 @@ namespace NativeTranspiler.Analyzer
                     // inside an UNROLLED loop there is no real C++ loop, so a
                     //   `continue;` would jump to the outermost batch loop (for si), skipping
                     //   the remaining unrolled iterations AND the final store — output all zeros.
-                    //   Unrolled-loop frames have TrackerVar == "" (see GenerateUnrolledLoop);
+                    //   Unrolled-loop frames have an empty TrackerVar (see GenerateUnrolledLoop);
                     //   real scalar-for frames carry a non-empty saved-mask tracker.
-                    if (_loopStack.Count > 0 && string.IsNullOrEmpty(_loopStack.Peek().TrackerVar))
+                    if (_loopStack.Count > 0 && _loopStack.Peek().TrackerVar.IsEmpty)
                     {
                         string contTarget = _loopStack.Peek().ContinueLabel;
                         _gotoTargets.Add(contTarget);
@@ -66,14 +66,14 @@ namespace NativeTranspiler.Analyzer
                 }
                 else
                 {
-                    bool isAllTrue = _currentMask == "simd_mask::all_true()";
+                    bool isAllTrue = _currentMask.IsAllTrue;
 
                     // When all_true: skip emitting savedMask, but register it for restore
                     if (!isAllTrue)
                     {
                         if (!savedMaskEmitted)
                         {
-                            if (_currentMask.StartsWith("v_") || _currentMask.StartsWith("__"))
+                            if (_currentMask.IsNamedVar)
                             {
                                 savedMask = _currentMask;
                             }
@@ -88,7 +88,7 @@ namespace NativeTranspiler.Analyzer
                     else
                     {
                         // Sentinel: no emit needed, but restore will set _currentMask=all_true()
-                        savedMask = "simd_mask::all_true()";
+                        savedMask = SimdMask.AllTrue;
                     }
 
                     string trueMask;
@@ -97,7 +97,7 @@ namespace NativeTranspiler.Analyzer
                         // All lanes active on entry: the branch mask is JUST the condition
                         // (no savedMask AND needed). The condition MUST still be emitted —
                         // combine as all_true & !c0 & c1 (not c0 & !c0 & c1 = false).
-                        savedMask = "simd_mask::all_true()";
+                        savedMask = SimdMask.AllTrue;
                         savedMaskEmitted = true;
                         string condVar = $"__cond_{_maskCounter++}";
                         AppendLine($"simd_mask {condVar} = {condExpr};");
@@ -110,23 +110,28 @@ namespace NativeTranspiler.Analyzer
                         string condVar = $"__cond_{_maskCounter++}";
                         AppendLine($"simd_mask {condVar} = {condExpr};");
 
+                        bool trueMaskIsCompound = false;
                         if (isAllTrue)
                             trueMask = condVar;
                         else if (conditions.Count == 0)
+                        {
                             trueMask = $"simd_mask{{ n_and_mask({savedMask}.m, {condVar}.m) }}";
+                            trueMaskIsCompound = true;
+                        }
                         else
                         {
                             EnsureExcludedMaskUpTo(conditions, ref excludedMaskVar, ref excludedCount);
-                            string notPrev = excludedMaskVar ?? "simd_mask::all_true()";
+                            string notPrev = excludedMaskVar ?? SimdMask.AllTrue;
                             trueMask = $"simd_mask{{ n_and_mask({notPrev}.m, {condVar}.m) }}";
+                            trueMaskIsCompound = true;
                             // Skip redundant AND when savedMask is all_true: all_true & X == X
-                            if (savedMask != "simd_mask::all_true()")
+                            if (!savedMask.IsAllTrue)
                                 trueMask = $"simd_mask{{ n_and_mask({savedMask}.m, {trueMask}.m) }}";
                         }
 
                         conditions.Add(condVar);
                         _currentMask = trueMask;
-                        if (trueMask.Contains("n_and_mask("))
+                        if (trueMaskIsCompound)
                         {
                             string cm = $"__cm_{_maskCounter++}";
                             AppendLine($"simd_mask {cm} = {trueMask};");
@@ -134,7 +139,7 @@ namespace NativeTranspiler.Analyzer
                         }
                     }
                     bool bodyEmpty = current.Statement is BlockSyntax blk && blk.Statements.Count == 0;
-                    bool maskContinue = _loopStack.Count > 0 && !string.IsNullOrEmpty(_loopStack.Peek().BodyMaskVar);
+                    bool maskContinue = _loopStack.Count > 0 && !_loopStack.Peek().BodyMaskVar.IsEmpty;
                     bool bodyHasGoto = !bodyEmpty && HasControlFlowGoto(current.Statement, maskContinue);
                     if (bodyHasGoto)
                         AppendLine($"if ({trueMask}.any_true())");
@@ -164,16 +169,16 @@ namespace NativeTranspiler.Analyzer
                 // 优先复用递推排除变量（~c0 & ... & ~c_{k-1}），避免内联 O(N) 嵌套。
                 //   else 分支需排除全部条件 → 确保递推变量覆盖到 conditions.Count。
                 EnsureExcludedMaskUpTo(conditions, ref excludedMaskVar, ref excludedCount);
-                string notChain = excludedMaskVar ?? "simd_mask::all_true()";
+                string notChain = excludedMaskVar ?? SimdMask.AllTrue;
                 if (savedMaskEmitted)
                 {
                     // Skip redundant AND when savedMask is all_true: all_true & X == X
-                    if (savedMask == "simd_mask::all_true()")
+                    if (savedMask.IsAllTrue)
                         elseMaskExpr = notChain;
                     else
                         elseMaskExpr = $"simd_mask{{ n_and_mask({savedMask}.m, {notChain}.m) }}";
                 }
-                else if (savedMask == "simd_mask::all_true()")
+                else if (savedMask.IsAllTrue)
                     elseMaskExpr = notChain;
                 else
                     elseMaskExpr = _currentMask;
@@ -184,7 +189,7 @@ namespace NativeTranspiler.Analyzer
                 _currentMask = elseMaskVar;
 
                 bool elseBodyEmpty = elseBody is BlockSyntax elseBlk && elseBlk.Statements.Count == 0;
-                bool maskContinue = _loopStack.Count > 0 && !string.IsNullOrEmpty(_loopStack.Peek().BodyMaskVar);
+                bool maskContinue = _loopStack.Count > 0 && !_loopStack.Peek().BodyMaskVar.IsEmpty;
                 bool elseHasGoto = !elseBodyEmpty && HasControlFlowGoto(elseBody, maskContinue);
                 if (elseHasGoto)
                     AppendLine($"if ({elseMaskVar}.any_true())");
@@ -195,14 +200,14 @@ namespace NativeTranspiler.Analyzer
             }
 
             // Restore (skip if mask was never saved — e.g., dead-false continue)
-            if (savedMaskEmitted || !string.IsNullOrEmpty(savedMask))
+            if (savedMaskEmitted || !savedMask.IsEmpty)
                 _currentMask = savedMask;
             // A branch may have removed lanes through break/continue. Restoring
             // its entry mask must not reactivate those lanes for later statements.
-            if (_loopStack.Count > 0 && !string.IsNullOrEmpty(_loopStack.Peek().BodyMaskVar)
+            if (_loopStack.Count > 0 && !_loopStack.Peek().BodyMaskVar.IsEmpty
                 && _currentMask != _loopStack.Peek().BodyMaskVar)
             {
-                string bodyMask = _loopStack.Peek().BodyMaskVar;
+                SimdMask bodyMask = _loopStack.Peek().BodyMaskVar;
                 string postMask = $"__post_if_{_maskCounter++}";
                 AppendLine($"simd_mask {postMask} = simd_mask{{ n_and_mask({_currentMask}.m, {bodyMask}.m) }};");
                 _currentMask = postMask;

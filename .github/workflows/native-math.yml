@@ -1,0 +1,141 @@
+name: native-math
+
+on:
+  push:
+    paths:
+      - 'src/NativeDll/**'
+      - 'tools/MathUlpCheck/**'
+      - '.github/workflows/native-math.yml'
+  pull_request:
+    paths:
+      - 'src/NativeDll/**'
+      - 'tools/MathUlpCheck/**'
+      - '.github/workflows/native-math.yml'
+  workflow_dispatch:
+
+jobs:
+  # 本机就能跑的分支：AVX2 内联数学的 ULP 门禁
+  avx2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S tools/MathUlpCheck -B build-avx2 -DCMAKE_BUILD_TYPE=Release -DENTJOY_MATH_ISA=avx2
+      - name: Build
+        run: cmake --build build-avx2 -j
+      - name: ULP gate (Fastest)
+        run: ./build-avx2/MathUlpCheck
+      - name: ULP gate (High)
+        run: ./build-avx2/MathUlpCheckHigh
+
+      - name: Domain gate (Fastest)
+        run: ./build-avx2/MathDomainCheck
+      - name: Domain gate (High)
+        run: ./build-avx2/MathDomainCheckHigh
+      - name: Gate (IEEE, AVX2)
+        run: |
+          ./build-avx2/MathDomainCheckIEEE
+          ./build-avx2/MathUlpCheckIEEE
+  # AVX512 指令用 Intel SDE 模拟：托管 runner 的 CPU 不一定有 AVX512
+  avx512:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S tools/MathUlpCheck -B build-avx512 -DCMAKE_BUILD_TYPE=Release -DENTJOY_MATH_ISA=avx512
+      - name: Build
+        run: cmake --build build-avx512 -j
+      - name: Fetch Intel SDE
+        run: |
+          URL=https://downloadmirror.intel.com/924984/sde-external-10.13.1-2026-07-28-lin.tar.xz
+          curl -fsSL -o sde.tar.xz "$URL"
+          tar xf sde.tar.xz
+          dir=$(echo sde-external-*/)
+          echo "SDE_DIR=${dir}" >> "$GITHUB_ENV"
+      # 编译门禁严格；数值执行 best effort —— GitHub 托管 runner 上 SDE 会让被测进程
+      # SIGSEGV（PIN 与内核交互），同一份产物在本地 Windows SDE 10.13.1 上跑通，
+      # 数值与 AVX2 逐项一致。
+      - name: ULP run (Fastest, AVX512, best effort, not a gate)
+        continue-on-error: true
+        run: |
+          sde="./${SDE_DIR}sde64"
+          "$sde" -skx -- "$PWD/build-avx512/MathUlpCheck"
+      - name: ULP run (High, AVX512, best effort, not a gate)
+        continue-on-error: true
+        run: |
+          sde="./${SDE_DIR}sde64"
+          "$sde" -skx -- "$PWD/build-avx512/MathUlpCheckHigh"
+
+  # NEON：交叉编译 ＋ qemu-user 运行。数学实现目前回退到 libm，因此这里验证的是
+  # 交叉编译链路与回退路径的精确性；NEON 内联实现落地后同一门禁即可覆盖。
+  # SSE4.1：无 AVX2 的 x86 路径。若已实现内联数学则在此门禁下测；未实现时测得的是 libm 回退。
+  sse41:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S tools/MathUlpCheck -B build-sse41 -DCMAKE_BUILD_TYPE=Release -DENTJOY_MATH_ISA=sse41
+      - name: Build
+        run: cmake --build build-sse41 -j
+      - name: ULP gate (Fastest, SSE4.1)
+        run: ./build-sse41/MathUlpCheck
+      - name: ULP gate (High, SSE4.1)
+        run: ./build-sse41/MathUlpCheckHigh
+
+      - name: Domain gate (Fastest, SSE4.1)
+        run: ./build-sse41/MathDomainCheck
+      - name: Domain gate (High, SSE4.1)
+        run: ./build-sse41/MathDomainCheckHigh
+      - name: Gate (IEEE, SSE4.1)
+        run: |
+          ./build-sse41/MathDomainCheckIEEE
+          ./build-sse41/MathUlpCheckIEEE
+  # AArch32：无 aarch64 指令，数学走标量回退；此作业验证回退路径能编译并通过门禁。
+  arm32:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-arm-linux-gnueabihf qemu-user
+      - name: Configure
+        run: |
+          cmake -S tools/MathUlpCheck -B build-arm32 -DCMAKE_BUILD_TYPE=Release \
+            -DENTJOY_MATH_ISA=auto \
+            -DENTJOY_MATH_EXTRA_FLAGS="-mfpu=neon -mfloat-abi=hard" \
+            -DCMAKE_CXX_COMPILER=arm-linux-gnueabihf-g++
+      - name: Build
+        run: cmake --build build-arm32 -j
+      - name: ULP gate (Fastest, emulated armv7)
+        run: qemu-arm -L /usr/arm-linux-gnueabihf ./build-arm32/MathUlpCheck
+      - name: Domain gate (Fastest, emulated armv7)
+        run: qemu-arm -L /usr/arm-linux-gnueabihf ./build-arm32/MathDomainCheck
+
+  neon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-aarch64-linux-gnu qemu-user cmake
+      - name: Configure
+        run: |
+          cmake -S tools/MathUlpCheck -B build-neon -DCMAKE_BUILD_TYPE=Release \
+            -DENTJOY_MATH_ISA=auto \
+            -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++
+      - name: Build
+        run: cmake --build build-neon -j
+      - name: ULP gate (Fastest, emulated aarch64)
+        run: qemu-aarch64 -L /usr/aarch64-linux-gnu ./build-neon/MathUlpCheck
+      - name: ULP gate (High, emulated aarch64)
+        run: qemu-aarch64 -L /usr/aarch64-linux-gnu ./build-neon/MathUlpCheckHigh
+      - name: Domain gate (Fastest, emulated aarch64)
+        run: qemu-aarch64 -L /usr/aarch64-linux-gnu ./build-neon/MathDomainCheck
+      - name: Domain gate (High, emulated aarch64)
+        run: qemu-aarch64 -L /usr/aarch64-linux-gnu ./build-neon/MathDomainCheckHigh
+      # qemu 的绝对时间无意义，这里只取同一进程内 内联/SIMD 与逐 lane libm 的比值
+      - name: Bench (relative, emulated aarch64)
+        run: ENTJOY_BENCH_N=16384 qemu-aarch64 -L /usr/aarch64-linux-gnu ./build-neon/MathExpBench

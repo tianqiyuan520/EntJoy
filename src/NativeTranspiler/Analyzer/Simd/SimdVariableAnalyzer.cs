@@ -219,14 +219,29 @@ namespace NativeTranspiler.Analyzer
                     string name = variable.Identifier.Text;
                     if (_variables.ContainsKey(name)) continue;
 
-                    // Text-based type detection (safe without semantic model)
+                    // 契约：语义模型给出类型时一律以 MapCSharpTypeToCpp 为准（唯一权威）。
+                    // 只有在重写树丢失来源注解、GetBoundType 返回 null 时才按声明语法名推断：
+                    // 指针取所指类型的叶子名，其余取类型名叶子，识别不出按 int 处理（与 C++ 侧默认一致）。
                     string typeText = localDecl.Declaration.Type.ToString();
-                    string cppType = "int";
-                    if (typeText.Contains("float2")) cppType = "EntJoy::Mathematics::float2";
-                    else if (typeText.Contains("int2")) cppType = "EntJoy::Mathematics::int2";
-                    else if (typeText == "float") cppType = "float";
-                    else if (typeText == "bool") cppType = "bool";
-                    else if (localDecl.Declaration.Type is PointerTypeSyntax) cppType = "int*";
+                    string typeLeaf = SimdVectorTypes.LeafName(typeText.Replace('.', ':'));
+                    string cppType = typeLeaf switch
+                    {
+                        "float2" => SimdVectorTypes.Float2,
+                        "int2" => SimdVectorTypes.Int2,
+                        "uint2" => SimdVectorTypes.Uint2,
+                        "float" => "float",
+                        "bool" => "bool",
+                        _ => localDecl.Declaration.Type is PointerTypeSyntax pointer
+                            ? SimdVectorTypes.LeafName(pointer.ElementType.ToString().Replace('.', ':')) switch
+                            {
+                                "float" => "float*",
+                                "double" => "double*",
+                                "bool" => "bool*",
+                                "byte" => "unsigned char*",
+                                _ => "int*"
+                            }
+                            : "int"
+                    };
                     if (SymbolHelper.GetBoundType(_semanticModel, localDecl.Declaration.Type) is ITypeSymbol boundType)
                     {
                         cppType = NativeTranspiler.MapCSharpTypeToCpp(boundType);
@@ -475,9 +490,13 @@ namespace NativeTranspiler.Analyzer
                     //   from the inner expression (both are CheckedExpressionSyntax in Roslyn).
                     return ClassifyExpressionInternal(checkedExpr.Expression);
 
-                case ObjectCreationExpressionSyntax _:
-                    // new float2(x, y) — 看参数
-                    return VarKind.Uniform; // 保守
+                case ObjectCreationExpressionSyntax creation:
+                    // new float2(x, y) —— 任一分量 varying 则整体 varying（否则分量会当成标量构造）。
+                    if (creation.ArgumentList == null) return VarKind.Uniform;
+                    var creationKind = VarKind.Uniform;
+                    foreach (var argument in creation.ArgumentList.Arguments)
+                        creationKind = Max(creationKind, ClassifyExpressionInternal(argument.Expression));
+                    return creationKind;
 
                 default:
                     return VarKind.Uniform; // 未知表达式保守返回 uniform

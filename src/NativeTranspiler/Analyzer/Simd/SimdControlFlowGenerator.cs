@@ -27,7 +27,7 @@ namespace NativeTranspiler.Analyzer
         private readonly NativeTranspiler.SimdMathPrecision _simdMathPrecision;
 
         // Mask management
-        private string _currentMask = "simd_mask::all_true()";
+        private SimdMask _currentMask = SimdMask.AllTrue;
         private int _maskCounter;
         private int _labelCounter;
         private bool _isUniformScalarLoop;
@@ -35,15 +35,19 @@ namespace NativeTranspiler.Analyzer
         private readonly HashSet<string> _forLoopVars = new();
         // Induction variables from uniform-bound reduction loops (for broadcast optimization)
         private readonly HashSet<string> _uniformLoopVars = new();
+        // 展开期常量：循环变量 → 本次迭代的字面值（连续下标判定用）
+        private readonly Dictionary<string, int> _uniformIterationConstants = new();
+        // 生成物里已是标量的名字（标量局部 / uniform 形参），连续下标判定用
+        private readonly HashSet<string> _scalarUniformNames = new();
 
         // Loop tracking (for break/continue)
         private struct LoopFrame
         {
-            public string TrackerVar;     // simd_tracker variable name
-            public string IterActiveVar;  // iter_active variable name
+            public SimdMask TrackerVar;     // simd_tracker variable name
+            public SimdMask IterActiveVar;  // iter_active variable name
             public string ExitLabel;      // goto label for break
             public string ContinueLabel;  // goto label for continue
-            public string BodyMaskVar;    // 循环体当前 mask 变量（break 需窄化它，见 GenerateBreakStatement）
+            public SimdMask BodyMaskVar;    // 循环体当前 mask 变量（break 需窄化它，见 GenerateBreakStatement）
         }
         private readonly Stack<LoopFrame> _loopStack = new();
 
@@ -80,11 +84,11 @@ namespace NativeTranspiler.Analyzer
         //   this mask get the "default" store (e.g. R[i] = 777 after a search loop).
         //   Avoids the old bug: one lane hits return → goto __simd_exit → all lanes skip
         //   the default store → non-returning lanes output 0 instead of 777 (EC5/FZ4 E7).
-        private string _returnedMaskVar = "";
-        // Struct varying locals: localName → (arrayName, elemCppType, indexExpr)
+        private SimdMask _returnedMaskVar = SimdMask.Empty;
+        // Struct varying locals: localName → (arrayName, elemCppType, indexExpr, varyingIndex)
         // These are struct-typed locals initialized from array[idx] where array is a struct-typed NativeArray.
         // decomposed into field-level gather/scatter at code-gen time (ISPC-style).
-        private readonly Dictionary<string, (string arrName, string elemCppType, string indexExpr)> _structVaryingLocals = new();
+        private readonly Dictionary<string, (string arrName, string elemCppType, string indexExpr, bool varyingIndex)> _structVaryingLocals = new();
 
         // 指针符号 → 元素 C++ 类型：不再在本类拷贝一份，直接用 SimdVariableAnalyzer 的
         // LocalPointerElemCpp / ParamPointerElemCpp（同一份数据，避免"两个真相"）。
@@ -126,13 +130,13 @@ namespace NativeTranspiler.Analyzer
             _nativeArrayParams = nativeArrayParams ?? new Dictionary<string, string>();
             _batchLoopVar = batchLoopVar;
 
-            // Pre-identify float2/int2 variables that are varying
+            // Pre-identify 2 分量向量变量（float2/int2/uint2）是不是 varying
             foreach (var kvp in _variables)
             {
                 if (kvp.Value.Kind >= VarKind.Varying)
                 {
                     var cppType = kvp.Value.CppType;
-                    if (cppType.Contains("float2") || cppType.Contains("int2"))
+                    if (SimdVectorTypes.IsPair(cppType))
                         _float2VaryingVars.Add(kvp.Key);
                 }
             }
@@ -147,22 +151,7 @@ namespace NativeTranspiler.Analyzer
         public string Generate(BlockSyntax body)
         {
             _builder.Clear();
-            _forLoopVars.Clear();
-            foreach (var fs in body.DescendantNodes().OfType<ForStatementSyntax>())
-                if (fs.Declaration != null)
-                    foreach (var v in fs.Declaration.Variables)
-                        _forLoopVars.Add(v.Identifier.Text);
-
-            // Prescan: find variables assigned from gather/gathf with clamp (skip redundant clamp)
-            _clampedVars.Clear();
-            foreach (var assign in body.DescendantNodes().OfType<AssignmentExpressionSyntax>())
-                if (assign.Left is IdentifierNameSyntax lhs && assign.Right is InvocationExpressionSyntax inv)
-                    if (IsGatherCall(inv))
-                        _clampedVars.Add(lhs.Identifier.Text);
-            foreach (var decl in body.DescendantNodes().OfType<LocalDeclarationStatementSyntax>())
-                foreach (var v in decl.Declaration.Variables)
-                    if (v.Initializer?.Value is InvocationExpressionSyntax inv2 && IsGatherCall(inv2))
-                        _clampedVars.Add(v.Identifier.Text);
+            PrescanTree(body);
 
             // IJob 的 Execute() 没有索引形参：整个实体体就是"整批标量循环"，per-lane 分组没有意义
             //   （si 无处可去，还会把体里自己的循环变量改名）。整段走标量翻译。
@@ -175,7 +164,7 @@ namespace NativeTranspiler.Analyzer
             else {
                 // E7 pre-scan: if body contains `return`, allocate a per-batch exit mask.
                 //   After all loops, lanes that DID NOT return get the default store.
-                _returnedMaskVar = "";
+                _returnedMaskVar = SimdMask.Empty;
                 if (body.DescendantNodes().OfType<ReturnStatementSyntax>().Any())
                 {
                     _returnedMaskVar = $"__returned_{_labelCounter++}";
@@ -189,6 +178,48 @@ namespace NativeTranspiler.Analyzer
             }
 
             return _builder.ToString();
+        }
+
+        /// <summary>
+        /// 单语句版本：用于把"整个方法体就是一个数据循环"的循环体摊到 SIMD 链路上。
+        /// 预扫描用该语句（及其父节点）做范围，发射只针对这一条语句。
+        /// 含 return 或不可向量化调用时返回 null，调用方退回标量翻译。
+        /// </summary>
+        public string Generate(StatementSyntax statement)
+        {
+            if (RequiresPerLaneLoopReturn(statement) || SimdVectorizability.HasNonVectorizableCall(statement, _varAnalyzer))
+                return null;
+
+            _builder.Clear();
+            PrescanTree(statement);
+
+            _returnedMaskVar = SimdMask.Empty;
+            GenerateVariableDeclarations();
+            PreScanUniformHoists(statement);
+            EmitUniformHoistPrologue();
+            GenerateStatement(statement);
+            return _builder.ToString();
+        }
+
+        /// <summary>生成前的公共扫描：for 循环变量登记 + gather 钳制变量登记。</summary>
+        private void PrescanTree(SyntaxNode body)
+        {
+            _forLoopVars.Clear();
+            foreach (var fs in body.DescendantNodesAndSelf().OfType<ForStatementSyntax>())
+                if (fs.Declaration != null)
+                    foreach (var v in fs.Declaration.Variables)
+                        _forLoopVars.Add(v.Identifier.Text);
+
+            // Prescan: find variables assigned from gather/gathf with clamp (skip redundant clamp)
+            _clampedVars.Clear();
+            foreach (var assign in body.DescendantNodesAndSelf().OfType<AssignmentExpressionSyntax>())
+                if (assign.Left is IdentifierNameSyntax lhs && assign.Right is InvocationExpressionSyntax inv)
+                    if (IsGatherCall(inv))
+                        _clampedVars.Add(lhs.Identifier.Text);
+            foreach (var decl in body.DescendantNodesAndSelf().OfType<LocalDeclarationStatementSyntax>())
+                foreach (var v in decl.Declaration.Variables)
+                    if (v.Initializer?.Value is InvocationExpressionSyntax inv2 && IsGatherCall(inv2))
+                        _clampedVars.Add(v.Identifier.Text);
         }
 
         /// <summary>SIMD 路径原生支持（可向量化）的方法名——不属于这些名字且实参含 varying 的调用一律视为不可向量化。</summary>
@@ -422,14 +453,14 @@ namespace NativeTranspiler.Analyzer
             }
             var frame = _loopStack.Peek();
             _gotoTargets.Add(frame.ExitLabel);
-            if (string.IsNullOrEmpty(frame.TrackerVar))
+            if (frame.TrackerVar.IsEmpty)
             {
                 // Uniform scalar for-loop: all lanes share the loop counter, so a
                 // break is a plain goto to the exit label (no per-lane tracker to kill).
                 // The old code emitted "<empty> = <empty> & ~<empty>;" here.
                 AppendLine($"goto {frame.ExitLabel};");
             }
-            else if (string.IsNullOrEmpty(frame.IterActiveVar))
+            else if (frame.IterActiveVar.IsEmpty)
             {
                 // Uniform-count loop with a per-lane (varying) break condition:
                 // kill the matching lanes from the tracker; only when NO lane is left
@@ -444,7 +475,7 @@ namespace NativeTranspiler.Analyzer
                 // mask（BodyMaskVar），使后续语句跳过已 break 的 lane；仅当所有 lane 都退出才
                 // 触发即整组退出。
                 AppendLine($"{frame.TrackerVar} = {frame.TrackerVar} & simd_mask{{ n_not_mask({_currentMask}.m) }};");
-                if (!string.IsNullOrEmpty(frame.BodyMaskVar))
+                if (!frame.BodyMaskVar.IsEmpty)
                     AppendLine($"{frame.BodyMaskVar} = {frame.BodyMaskVar} & simd_mask{{ n_not_mask({_currentMask}.m) }};");
                 // 分支收敛：删除「tracker 空则立即 goto exit」——tracker 被清空后
                 //   下一轮循环头（`wm = wcond & tracker; if (!wm.any_true()) break`）自然退出，
@@ -464,7 +495,7 @@ namespace NativeTranspiler.Analyzer
             // Docs-style scalar for loop: mask already narrowed by if-body's early exit.
             //   The `if(!active.any_true()) continue;` is emitted inline by GenerateIfStatement.
             //   We just emit the goto for the loop frame (used by tracker-based while-true loops).
-            if (string.IsNullOrEmpty(frame.TrackerVar))
+            if (frame.TrackerVar.IsEmpty)
             {
                 // No tracker → scalar for loop → goto is actually a real C++ continue target
                 // The goto is inside an `any_true()` guard, so it's fine
@@ -479,7 +510,7 @@ namespace NativeTranspiler.Analyzer
                 //   continue lane，后续语句照常执行但 mask 为空（无副作用），消除每轮 1 次
                 //   any_true + 1 分支（C12：3 any_true/4 分支 → 2/2，对齐 ISPC）。
                 //   continue 语句体（如 j+=1）已在 if 块内以 blend 形式执行完毕。
-                if (string.IsNullOrEmpty(frame.BodyMaskVar))
+                if (frame.BodyMaskVar.IsEmpty)
                 {
                     // 没有 body mask 的 tracker 循环：只能整组跳到 continue 标签。
                     AppendLine($"goto {frame.ContinueLabel};");
@@ -492,7 +523,7 @@ namespace NativeTranspiler.Analyzer
 
         private void GenerateReturnStatement(ReturnStatementSyntax stmt)
         {
-            if (!string.IsNullOrEmpty(_returnedMaskVar))
+            if (!_returnedMaskVar.IsEmpty)
             {
                 // mark this lane as returned and kill from active mask.
                 AppendLine($"{_returnedMaskVar} = simd_mask{{ n_or_mask({_returnedMaskVar}.m, {_currentMask}.m) }};");

@@ -38,8 +38,8 @@ public struct RelationMaskCppBits : IJobChunk
     }
 }
 
-[NativeTranspile(Target = BackendTarget.Cpp, AutoSIMD = AutoSIMD.Vectorize)]
-public struct RelationMaskCppVectorize : IJobChunk
+[NativeTranspile(Target = BackendTarget.Cpp, AutoSIMD = AutoSIMD.Disabled)]
+public struct RelationMaskCppScalar : IJobChunk
 {
     public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask mask)
     {
@@ -58,7 +58,7 @@ public struct RelationMaskEntityCpp : IJobEntity
     public void Execute(ref ReadLinkOutput output) { output.Value += 1; }
 }
 
-[NativeTranspile(Target = BackendTarget.Cpp, AutoSIMD = AutoSIMD.Vectorize)]
+[NativeTranspile(Target = BackendTarget.Cpp, AutoSIMD = AutoSIMD.Disabled)]
 public struct RelationMaskEntityIdentityCpp : IJobEntity
 {
     public void Execute(Entity entity, ref ReadLinkOutput output) { output.Value = entity.Id + 1; }
@@ -112,20 +112,6 @@ public struct RelationMaskIspcBits : IJobChunk
     }
 }
 
-[NativeTranspile(Target = BackendTarget.Ispc, UseISPC_MT = true)]
-public struct RelationMaskIspcTasks : IJobChunk
-{
-    public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask mask)
-    {
-        var output = chunk.GetComponentDataSpan<ReadLinkOutput>();
-        for (int i = 0; i < chunk.Count; i++)
-        {
-            if (mask.Length != 0 && !mask.IsEnabled(i)) continue;
-            output[i].Value += 1;
-        }
-    }
-}
-
 [NativeTranspile(Target = BackendTarget.Ispc)]
 public struct RelationMaskEntityIspc : IJobEntity
 {
@@ -134,7 +120,7 @@ public struct RelationMaskEntityIspc : IJobEntity
 
 public struct RelationMaskEvent { public int Slot; }
 
-[NativeTranspile(Target = BackendTarget.Ispc, UseISPC_MT = true)]
+[NativeTranspile(Target = BackendTarget.Ispc)]
 public struct RelationMaskIspcTaskEvents : IJobChunk
 {
     public void Execute(ArchetypeChunk chunk, in ChunkEnabledMask mask)
@@ -158,14 +144,13 @@ public static unsafe class RelationshipMaskFixture
         {
             ((path, world, query) => ExecuteChunk<RelationMaskCpp>(path, world, query, true), 5, true, false),
             ((path, world, query) => ExecuteChunk<RelationMaskCppBits>(path, world, query, false), 5, false, false),
-            ((path, world, query) => ExecuteChunk<RelationMaskCppVectorize>(path, world, query, false), 5, false, false),
+            ((path, world, query) => ExecuteChunk<RelationMaskCppScalar>(path, world, query, false), 5, false, false),
             ((path, world, query) => ExecuteChunk<RelationMaskRangesCpp>(path, world, query, false), 5, false, false),
             ((path, world, query) => Execute<RelationMaskEntityCpp>(path, world, query, false, entity: true), 3, false, false),
             ((path, world, query) => Execute<RelationMaskEntityIdentityCpp>(path, world, query, false, entity: true), 3, false, true),
 #if ENTJOY_FIXTURE_ISPC
             ((path, world, query) => Execute<RelationMaskIspc>(path, world, query, false), 3, false, false),
             ((path, world, query) => Execute<RelationMaskIspcBits>(path, world, query, false), 3, false, false),
-            ((path, world, query) => Execute<RelationMaskIspcTasks>(path, world, query, false), 3, false, false),
             ((path, world, query) => Execute<RelationMaskEntityIspc>(path, world, query, false, entity: true), 3, false, false),
 #endif
         };

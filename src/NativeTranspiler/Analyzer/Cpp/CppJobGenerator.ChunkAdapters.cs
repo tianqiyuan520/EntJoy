@@ -22,39 +22,6 @@ namespace NativeTranspiler.Analyzer
             var attrSymbol = AttributeHelper.GetAttributeSymbol(compilation);
             var autoSIMD = attrSymbol != null ? AttributeHelper.GetAutoSIMD(jobStruct, attrSymbol) : NativeTranspiler.AutoSIMD.Disabled;
             bool isIspcJob = attrSymbol != null && AttributeHelper.GetBackendTarget(jobStruct, attrSymbol) == NativeTranspiler.BackendTarget.Ispc;
-            sb.AppendLine("#ifndef __EntJoyChunkContextHeader_DEFINED");
-            sb.AppendLine("#define __EntJoyChunkContextHeader_DEFINED");
-            sb.AppendLine("struct __EntJoyChunkContextHeader");
-            sb.AppendLine("{");
-            sb.AppendLine("    int chunkCount;");
-            sb.AppendLine("    int hasEnabledFilter;");
-            sb.AppendLine("    void* queryAllEnabledTypes;");
-            sb.AppendLine("    int allEnabledCount;");
-            sb.AppendLine("    int gcHandleStartIndex;");
-            sb.AppendLine("    void* chunksPtr;");
-            sb.AppendLine("    int cleanupInProgress;");
-            sb.AppendLine("    int ownsChunkData;");
-            sb.AppendLine("    void* requiredComponentTypeIds;");
-            sb.AppendLine("    int requiredComponentTypeIdCount;");
-            sb.AppendLine("    int jobIsBoxed;");
-            sb.AppendLine("    void* chunkArrayHandle;");
-            sb.AppendLine("    // Event Buffer");
-            sb.AppendLine("    int eventBufferCount;");
-            sb.AppendLine("    void* eventBufferHeaders;");
-            sb.AppendLine("    void* eventWorldHandle;");
-            sb.AppendLine("};");
-            sb.AppendLine("#endif");
-            sb.AppendLine();
-            sb.AppendLine("#ifndef __EntJoyEventBuffer_DEFINED");
-            sb.AppendLine("#define __EntJoyEventBuffer_DEFINED");
-            sb.AppendLine("struct __EntJoyEventBuffer {");
-            sb.AppendLine("    void* data;");
-            sb.AppendLine("    int* count;");
-            sb.AppendLine("    int capacity;");
-            sb.AppendLine("    int elementSize;");
-            sb.AppendLine("};");
-            sb.AppendLine("#endif");
-            sb.AppendLine();
 
             bool isEntityJob = IsEntityJob(jobStruct);
             bool useFastMath = AttributeHelper.HasFastCppMathLib(jobStruct, attrSymbol);
@@ -312,6 +279,20 @@ char* __jobContext = (char*)context + __headerSize + __typesDataSize + __require
                     }
                     simdSb.AppendLine("        int __entity_count = __batchData->entityCount;");
 
+                    // 逐槽摊平：连续列上按标量槽整宽读写，取代结构体步长的 gather/scatter。
+                    if (TryBuildFlattenedSlotBody(methodSyntax, entityLoopIv, chunkArrays, useFastMath, jobStruct,
+                            compilation, sm, out var flatStatements, out var flatAssertions, out int flatSlots))
+                    {
+                        foreach (var assertion in flatAssertions) simdSb.AppendLine("        " + assertion);
+                        simdSb.AppendLine($"        int __flat_end = __entity_count * {flatSlots};");
+                        simdSb.AppendLine("        for (int __flat = 0; __flat < __flat_end; ++__flat)");
+                        simdSb.AppendLine("        {");
+                        foreach (var statement in flatStatements) simdSb.AppendLine("            " + statement);
+                        simdSb.AppendLine("        }");
+                    }
+                    else
+                    {
+
                     // 假方法（加 entityIdx 参数）供 SimdVariableAnalyzer
                     var newParams = methodSyntax.ParameterList.AddParameters(
                         SyntaxFactory.Parameter(SyntaxFactory.Identifier(entityLoopIv))
@@ -355,7 +336,7 @@ char* __jobContext = (char*)context + __headerSize + __typesDataSize + __require
                     // 标量余量循环（__chunkData → __batchData 替换）
                     var remTr = new CppChunkStatementTranslator(sm, jobStruct,
                         CollectChunkNativeArrayTypes(jobStruct, compilation),
-                        CollectSharedComponentTypes(jobStruct, compilation), useFastMath);
+                        CollectSharedComponentTypes(jobStruct, compilation), useFastMath, emitAlignmentHints: true);
                     string remBody = remTr.Translate(methodSyntax.Body);
                     remBody = remBody.Replace("__chunkData->requiredComponentArrays", "__batchData->componentArrays");
                     remBody = remBody.Replace("__chunkData->requiredEnableBitMaps", "__batchData->enableBitMaps");
@@ -371,9 +352,11 @@ char* __jobContext = (char*)context + __headerSize + __typesDataSize + __require
                     string loopPattern = $"for (int {entityLoopIv} = 0; {entityLoopIv} <";
                     string loopReplacement = $"for (int {entityLoopIv} = __simd_end; {entityLoopIv} <";
                     remBody = remBody.Replace(loopPattern, loopReplacement);
-                    foreach (var l in remBody.Split('\n'))
+                    foreach (var l in remBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
                         if (!string.IsNullOrWhiteSpace(l))
                             simdSb.AppendLine($"        {l.TrimEnd()}");
+
+                    }
 
                     // 全部成功 → 合并到 sb
                     sb.Append(simdSb);
@@ -383,12 +366,12 @@ char* __jobContext = (char*)context + __headerSize + __typesDataSize + __require
                     // 不满足 SIMD 入口条件时，标量翻译完整实体循环，保持每个实体的执行次数。
                     var fbTr = new CppChunkStatementTranslator(sm, jobStruct,
                         CollectChunkNativeArrayTypes(jobStruct, compilation),
-                        CollectSharedComponentTypes(jobStruct, compilation), useFastMath);
+                        CollectSharedComponentTypes(jobStruct, compilation), useFastMath, emitAlignmentHints: true);
                     string fbBody = fbTr.Translate(methodSyntax.Body);
                     fbBody = fbBody.Replace("__chunkData->requiredComponentArrays", "__batchData->componentArrays");
                     fbBody = fbBody.Replace("__chunkData->requiredEnableBitMaps", "__batchData->enableBitMaps");
                     fbBody = fbBody.Replace("__chunkData->entityCount", "__batchData->entityCount");
-                    foreach (var l in fbBody.Split('\n'))
+                    foreach (var l in fbBody.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
                         if (!string.IsNullOrWhiteSpace(l))
                             sb.AppendLine($"        {l.TrimEnd()}");
                 }
@@ -399,20 +382,14 @@ char* __jobContext = (char*)context + __headerSize + __typesDataSize + __require
                 var sm = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
                 var rt = CollectChunkNativeArrayTypes(jobStruct, compilation);
                 var st = CollectSharedComponentTypes(jobStruct, compilation);
-                var tr = new CppChunkStatementTranslator(sm, jobStruct, rt, st, useFastMath);
+                var tr = new CppChunkStatementTranslator(sm, jobStruct, rt, st, useFastMath, emitAlignmentHints: true);
                 var bodyCode = tr.Translate(methodSyntax.Body);
                 bodyCode = bodyCode.Replace("__chunkData->requiredComponentArrays", "__batchData->componentArrays");
                 bodyCode = bodyCode.Replace("__chunkData->requiredEnableBitMaps", "__batchData->enableBitMaps");
                 bodyCode = bodyCode.Replace("__chunkData->entityCount", "__batchData->entityCount");
-                foreach (var l in bodyCode.Split(new[] { "\n" }, StringSplitOptions.None))
+                foreach (var l in bodyCode.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
                 {
                     if (l.Length > 0) sb.Append("        ").AppendLine(l);
-                    string trimmed = l.TrimStart();
-                    if (trimmed.StartsWith("auto*") && trimmed.Contains("reinterpret_cast<"))
-                    {
-                        string varName = trimmed.Split('=')[0].Trim().Split(' ').Last();
-                        sb.AppendLine($"        (void)((intptr_t){varName} % 64 == 0);");
-                    }
                 }
             }
             if (returnsFromChunk) sb.AppendLine("        }();");

@@ -29,12 +29,20 @@ namespace EntJoy.ECS.SourceGenerator
                 .Where(static n => n > 0);
 
             var collected = arityProvider.Collect();
+            var withAssembly = context.CompilationProvider.Combine(collected);
 
-            context.RegisterSourceOutput(collected, static (spc, arities) =>
+            context.RegisterSourceOutput(withAssembly, static (spc, input) =>
             {
                 var unique = new SortedSet<int>();
-                foreach (var n in arities)
-                    if (n > 0) unique.Add(n);
+                // ECS 程序集自己承载 1/2 组件形态（QuerySelection 直接引用它们，且消费方不该重复生成）；
+                // 其它程序集只发射语法里真正用到的 3 档以上形态。
+                if (input.Left.AssemblyName == "EntJoy.ECS")
+                {
+                    unique.Add(1);
+                    unique.Add(2);
+                }
+                foreach (var n in input.Right)
+                    if (n > 2) unique.Add(n);
 
                 foreach (var n in unique)
                 {
@@ -66,6 +74,7 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("{");
             sb.AppendLine("    private readonly EntityManager _entityManager;");
             sb.AppendLine("    private readonly QueryBuilder _builder;");
+            sb.AppendLine($"    private static readonly ComponentType[] Columns = {{ {typeOfArgs} }};");
             sb.AppendLine();
             sb.AppendLine("    internal QueryEnumerable(EntityManager entityManager, QueryBuilder builder)");
             sb.AppendLine("    {");
@@ -86,83 +95,48 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine($"    private static readonly ComponentType[] Columns = {{ {typeOfArgs} }};");
             sb.AppendLine("    private QueryTraversalCursor _cursor;");
             sb.AppendLine("    private readonly QueryReadState _readState;");
-            // 计划表只内联前 3 列基址；更宽的元组继续走游标路径。
-            bool useChunkTable = n <= 3;
-            if (useChunkTable)
-            {
-                sb.AppendLine("    private readonly bool _useChunkTable;");
-                sb.AppendLine("    private int _chunkTableIndex;");
-            }
             sb.AppendLine("    // 相对连续区间末尾的偏移；有效实体为负数。");
             sb.AppendLine("    private int _slotOffset;");
             sb.AppendLine("    private int _rangeEnd;");
             for (int i = 0; i < n; i++)
                 sb.AppendLine($"    private T{i}* _base{i};");
+            sb.AppendLine("    // 低 16 位：该列是关系列（只读）；高 16 位：该列没有列基址。构造与进块时各算一次。");
+            sb.AppendLine("    private int _guardMask;");
             sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
             sb.AppendLine($"    internal QueryEnumerator(EntityManager manager, QueryBuilder builder)");
             sb.AppendLine("    {");
             sb.AppendLine("        _cursor = new QueryTraversalCursor(manager, builder, Columns);");
             string relationTypes = string.Join(" || ", genParams.Select(g => $"ComponentTypeManager.IsRelationType<{g}>()"));
             sb.AppendLine($"        _readState = new QueryReadState(manager, builder.HasRelationshipFilter || {relationTypes});");
-            if (useChunkTable)
-            {
-                sb.AppendLine("        _useChunkTable = _cursor.CanUseChunkTable;");
-                sb.AppendLine("        _chunkTableIndex = -1;");
-            }
             sb.AppendLine("        _slotOffset = -1;");
             sb.AppendLine("        _rangeEnd = 0;");
+            for (int i = 0; i < n; i++)
+                sb.AppendLine($"        _guardMask |= ComponentTypeManager.IsRelationType<T{i}>() ? 1 << {i} : 0;");
             for (int i = 0; i < n; i++) sb.AppendLine($"        _base{i} = null;");
             sb.AppendLine("    }");
             sb.AppendLine("    [SkipLocalsInit]");
             sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
             sb.AppendLine("    public bool MoveNext()");
             sb.AppendLine("    {");
-            sb.AppendLine("        _readState.ValidateTracked();");
             sb.AppendLine("        _slotOffset++;");
-            sb.AppendLine("        // 区间内只递增槽位，跨区间时再解析过滤和列基址。");
             sb.AppendLine("        if (_slotOffset < 0) return true;");
-            sb.AppendLine("        {");
-            if (useChunkTable)
-            {
-                sb.AppendLine("            if (_useChunkTable)");
-                sb.AppendLine("            {");
-                sb.AppendLine("                int next = _chunkTableIndex + 1;");
-                sb.AppendLine("                if (next < _cursor.ChunkCount)");
-                sb.AppendLine("                {");
-                sb.AppendLine("                    _chunkTableIndex = next;");
-                sb.AppendLine("                    ref readonly var entry = ref _cursor.ChunkEntry(next);");
-                sb.AppendLine("                    _rangeEnd = entry.Count;");
-                sb.AppendLine("                    _slotOffset = -entry.Count;");
-                for (int i = 0; i < n; i++) sb.AppendLine($"                    _base{i} = (T{i}*)entry.Base{i} + entry.Count;");
-                sb.AppendLine("                }");
-                sb.AppendLine("                else");
-                sb.AppendLine("                {");
-                sb.AppendLine("                    _rangeEnd = 0;");
-                sb.AppendLine("                    _slotOffset = 0;");
-                for (int i = 0; i < n; i++) sb.AppendLine($"                    _base{i} = null;");
-                sb.AppendLine("                }");
-                sb.AppendLine("            }");
-                sb.AppendLine("            else");
-                sb.AppendLine("            {");
-                AppendCursorChunkPath(sb, n, "                ");
-                sb.AppendLine("            }");
-            }
-            else
-            {
-                AppendCursorChunkPath(sb, n, "            ");
-            }
-            sb.AppendLine("        }");
-            sb.AppendLine("        // 区间内 _slotOffset 恒为负；HasChunk 时 RangeEnd 必大于 0，故该判据与基址判空等价。");
-            sb.AppendLine("        return _slotOffset < 0;");
+            sb.AppendLine("        // 跨区间交给静态方法按值交接：枚举器自身地址不外泄，字段才可能留在寄存器。");
+            sb.AppendLine($"        var step = QueryAdvance{n}<{genList}>.Step(_cursor, _readState, _slotOffset + _rangeEnd, _guardMask);");
+            sb.AppendLine("        _cursor = step.Cursor;");
+            sb.AppendLine("        _rangeEnd = step.RangeEnd;");
+            sb.AppendLine("        _slotOffset = step.SlotOffset;");
+            sb.AppendLine("        _guardMask = step.GuardMask;");
+            for (int i = 0; i < n; i++)
+                sb.AppendLine($"        _base{i} = step.Base{i};");
+            sb.AppendLine("        return step.HasCurrent;");
             sb.AppendLine("    }");
             sb.AppendLine($"    public EntityQueryResult<{genList}> Current");
             sb.AppendLine("    {");
             sb.AppendLine("        [MethodImpl(MethodImplOptions.AggressiveInlining)]");
             sb.AppendLine("        get");
             sb.AppendLine("        {");
-            sb.AppendLine("            _readState.ValidateTracked();");
-            sb.AppendLine("            if (_base0 == null) throw new InvalidOperationException();");
-            sb.AppendLine($"            return new EntityQueryResult<{genList}>({string.Join(", ", genParams.Select((_, i) => $"_base{i} + _slotOffset"))}, _readState);");
+            sb.AppendLine("            if (_rangeEnd == 0) throw new InvalidOperationException();");
+            sb.AppendLine($"            return new EntityQueryResult<{genList}>({string.Join(", ", genParams.Select((_, i) => $"_base{i} + _slotOffset"))}, _guardMask);");
             sb.AppendLine("        }");
             sb.AppendLine("    }");
             sb.AppendLine("}");
@@ -173,14 +147,24 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("{");
             for (int i = 0; i < n; i++)
                 sb.AppendLine($"    private readonly {genParams[i]}* _c{i};");
-            sb.AppendLine("    private readonly QueryReadState _readState;");
+            sb.AppendLine("    // 低 16 位：该列是关系列（只读）；高 16 位：该列没有列基址。由枚举器在构造与进块时算一次。");
+            sb.AppendLine("    private readonly int _guardMask;");
             sb.AppendLine();
             sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
-            sb.AppendLine($"    internal EntityQueryResult({string.Join(", ", genParams.Select((g, i) => $"{g}* c{i}"))}, QueryReadState readState)");
+            sb.AppendLine($"    public EntityQueryResult({string.Join(", ", genParams.Select((g, i) => $"{g}* c{i}"))}, int guardMask = -1)");
             sb.AppendLine("    {");
-            sb.AppendLine("        _readState = readState;");
             for (int i = 0; i < n; i++)
                 sb.AppendLine($"        _c{i} = c{i};");
+            sb.AppendLine("        // 枚举器把掩码算好传进来（热路径）；手工构造时按类型与列基址推导，默认不放行关系列写。");
+            sb.AppendLine("        if (guardMask < 0)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            guardMask = 0;");
+            for (int i = 0; i < n; i++)
+                sb.AppendLine($"            if (ComponentTypeManager.IsRelationType<{genParams[i]}>()) guardMask |= 1 << {i};");
+            for (int i = 0; i < n; i++)
+                sb.AppendLine($"            if (c{i} == null) guardMask |= 1 << {16 + i};");
+            sb.AppendLine("        }");
+            sb.AppendLine("        _guardMask = guardMask;");
             sb.AppendLine("    }");
             sb.AppendLine();
             for (int i = 0; i < n; i++)
@@ -188,16 +172,28 @@ namespace EntJoy.ECS.SourceGenerator
                 sb.AppendLine($"    public ref readonly {genParams[i]} ReadOnlyComp{i}");
                 sb.AppendLine("    {");
                 sb.AppendLine("        [MethodImpl(MethodImplOptions.AggressiveInlining)]");
-                sb.AppendLine($"        get {{ _readState.ValidateTracked(); return ref Unsafe.AsRef<{genParams[i]}>(_c{i}); }}");
+                sb.AppendLine("        get");
+                sb.AppendLine("        {");
+                sb.AppendLine($"            if ((_guardMask & (1 << {16 + i})) != 0) throw new NotSupportedException(\"Managed multi-target relations have no component column; use GetRelationships or CopyRelationships.\");");
+                sb.AppendLine($"            return ref Unsafe.AsRef<{genParams[i]}>(_c{i});");
+                sb.AppendLine("        }");
                 sb.AppendLine("    }");
                 sb.AppendLine($"    public ref {genParams[i]} Comp{i}");
                 sb.AppendLine("    {");
                 sb.AppendLine("        [MethodImpl(MethodImplOptions.AggressiveInlining)]");
-                sb.AppendLine($"        get {{ ComponentTypeManager.CheckWritableAccess<{genParams[i]}>(_readState); return ref Unsafe.AsRef<{genParams[i]}>(_c{i}); }}");
+                sb.AppendLine("        get");
+                sb.AppendLine("        {");
+                sb.AppendLine("            // 关系列只能读：直接写会绕过关系索引。判据由枚举器一次算好，避免逐实体读泛型静态字段。");
+                sb.AppendLine($"            if ((_guardMask & (1 << {i})) != 0)");
+                sb.AppendLine($"                throw new InvalidOperationException($\"Relationship '{{typeof({genParams[i]})}}' requires read-only access; use EntityManager or DeferredCommandBuffer to change it.\");");
+                sb.AppendLine($"            return ref Unsafe.AsRef<{genParams[i]}>(_c{i});");
+                sb.AppendLine("        }");
                 sb.AppendLine("    }");
             }
             sb.AppendLine("}");
             sb.AppendLine();
+
+            AppendAdvanceStruct(sb, n, genParams, genList, whereClause);
 
             // World.Query<T0..Tn>（扩展方法：partial 跨程序集不合并，须用 this World）
             // 类名带 arity 后缀：同程序集内不同 arity 生成不同类，防 CS0101 同名冲突。
@@ -220,23 +216,44 @@ namespace EntJoy.ECS.SourceGenerator
             return sb.ToString();
         }
 
-        /// <summary>按实体过滤的元组走游标推进：每实体算一次连续启用区间，Chunk 切换时搬动游标。</summary>
-        private static void AppendCursorChunkPath(StringBuilder sb, int n, string indent)
+        /// <summary>跨区间推进的按值交接：静态方法只读写自己拿到的副本，枚举器的地址因此不外泄。</summary>
+        private static void AppendAdvanceStruct(StringBuilder sb, int n, List<string> genParams, string genList, string whereClause)
         {
-            sb.AppendLine(indent + "var cursor = QueryTraversalCursor.Next(_cursor, _slotOffset + _rangeEnd);");
-            sb.AppendLine(indent + "_cursor = cursor;");
-            sb.AppendLine(indent + "if (cursor.HasChunk)");
-            sb.AppendLine(indent + "{");
-            sb.AppendLine(indent + "    _rangeEnd = cursor.RangeEnd;");
-            sb.AppendLine(indent + "    _slotOffset = cursor.Slot - _rangeEnd;");
-            for (int i = 0; i < n; i++) sb.AppendLine(indent + $"    _base{i} = (T{i}*)cursor.ComponentBase({i}) + _rangeEnd;");
-            sb.AppendLine(indent + "}");
-            sb.AppendLine(indent + "else");
-            sb.AppendLine(indent + "{");
-            sb.AppendLine(indent + "    _rangeEnd = 0;");
-            sb.AppendLine(indent + "    _slotOffset = 0;");
-            for (int i = 0; i < n; i++) sb.AppendLine(indent + $"    _base{i} = null;");
-            sb.AppendLine(indent + "}");
+            sb.AppendLine($"public unsafe struct QueryAdvance{n}<{genList}>");
+            sb.AppendLine($"    {whereClause}");
+            sb.AppendLine("{");
+            sb.AppendLine("    public QueryTraversalCursor Cursor;");
+            sb.AppendLine("    public int RangeEnd;");
+            sb.AppendLine("    public int SlotOffset;");
+            sb.AppendLine("    public int GuardMask;");
+            for (int i = 0; i < n; i++)
+                sb.AppendLine($"    public {genParams[i]}* Base{i};");
+            sb.AppendLine("    public bool HasCurrent;");
+            sb.AppendLine();
+            sb.AppendLine("    [MethodImpl(MethodImplOptions.NoInlining)]");
+            sb.AppendLine($"    public static QueryAdvance{n}<{genList}> Step(QueryTraversalCursor cursor, QueryReadState readState, int slot, int guardMask)");
+            sb.AppendLine("    {");
+            sb.AppendLine("        readState.ValidateTracked();");
+            sb.AppendLine("        QueryTraversalCursor.Next(ref cursor, slot);");
+            sb.AppendLine($"        var step = default(QueryAdvance{n}<{genList}>);");
+            sb.AppendLine("        step.Cursor = cursor;");
+            sb.AppendLine("        step.GuardMask = guardMask;");
+            sb.AppendLine("        if (!cursor.HasChunk) return step;");
+            sb.AppendLine("        step.RangeEnd = cursor.RangeEnd;");
+            sb.AppendLine("        step.SlotOffset = cursor.Slot - step.RangeEnd;");
+            for (int i = 0; i < n; i++)
+            {
+                // 没有列基址的只有托管多目标关系：是否缺列记在掩码里，逐实体访问只读一个掩码位。
+                sb.AppendLine($"        nint column{i} = cursor.ComponentBase({i});");
+                sb.AppendLine($"        step.Base{i} = ({genParams[i]}*)column{i} + step.RangeEnd;");
+                sb.AppendLine($"        step.GuardMask = column{i} == 0 ? (guardMask | (1 << {16 + i})) : (guardMask & ~(1 << {16 + i}));");
+                sb.AppendLine($"        guardMask = step.GuardMask;");
+            }
+            sb.AppendLine("        step.HasCurrent = step.SlotOffset < 0;");
+            sb.AppendLine("        return step;");
+            sb.AppendLine("    }");
+            sb.AppendLine("}");
+            sb.AppendLine();
         }
     }
 }

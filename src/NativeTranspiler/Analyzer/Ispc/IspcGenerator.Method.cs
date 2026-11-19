@@ -30,11 +30,37 @@ namespace NativeTranspiler.Analyzer.Common
             string ispcReturnType = IspcTypeMapper.FromCpp(cppReturnType);
 
             string paramList = BuildIspcParamList(fields, false, needResult ? ispcReturnType : null);
+            var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
+
+            // 整个方法体就是一个逐元素循环时，直接发射成 foreach：ISPC 的 uniform 循环一次
+            // 只算一个元素，而这类循环正是 C++ 侧靠 clang 自动向量化拿到的收益。
+            if (methodSyntax.Body != null && !needResult
+                && DataParallelLoop.TryGetSole(methodSyntax.Body, semanticModel,
+                    out var parallelLoop, out string parallelVar, out var parallelStart, out var parallelEnd))
+            {
+                sb.AppendLine($"export void {baseName}_impl({paramList})");
+                sb.AppendLine("{");
+                var parallelTranslator = new MethodIspcTranslator(semanticModel, method, needResult: false, useUniformVars: false);
+                // 边界表达式按参数映射翻译（值类型参数是 `X_ptr`，源码里的名字在 ISPC 里不存在）。
+                string startText = parallelTranslator.CaptureExpression(parallelStart);
+                string boundText = parallelTranslator.CaptureExpression(parallelEnd);
+                parallelTranslator.SetInsideForeach(true);
+                sb.AppendLine($"{Indent}foreach ({parallelVar} = {startText} ... {boundText})");
+                sb.AppendLine($"{Indent}{{");
+                // 单条语句不能合成新节点（不在语法树里会让语义模型抛异常），走单语句入口。
+                AppendIspcBody(sb, parallelLoop.Statement is BlockSyntax parallelBlock
+                    ? parallelTranslator.Translate(parallelBlock)
+                    : parallelTranslator.TranslateSingleStatement(parallelLoop.Statement), 2);
+                sb.AppendLine($"{Indent}}}");
+                sb.AppendLine("}");
+                return sb.ToString();
+            }
+
+            // 方法体不是单个逐元素循环：退回一个 lane 执行整个方法体。
             sb.AppendLine($"export void {baseName}_impl({paramList})");
             sb.AppendLine("{");
             sb.AppendLine($"{Indent}if (programIndex != 0) return;");
 
-            var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
             var translator = new MethodIspcTranslator(semanticModel, method, needResult: needResult, useUniformVars: true);
             if (methodSyntax.Body != null)
                 AppendIspcBody(sb, translator.Translate(methodSyntax.Body));
@@ -163,7 +189,7 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine("#include \"NativeMath.h\"");
             sb.AppendLine("#include \"NativeContainers.h\"");
             sb.AppendLine($"#include \"{baseName}_ispc.h\"");
-            sb.AppendLine(CodeTemplates.GenerateExportMacros());
+            sb.AppendLine("#include \"NativeGeneratedSupport.h\"");
             sb.AppendLine();
 
             var fields = GetFieldsFromMethod(method);
@@ -207,7 +233,7 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine("#include \"NativeContainers.h\"");
             sb.AppendLine($"#include \"{baseName}_mt_ispc.h\"");
             sb.AppendLine("#include <thread>");
-            sb.AppendLine(CodeTemplates.GenerateExportMacros());
+            sb.AppendLine("#include \"NativeGeneratedSupport.h\"");
             sb.AppendLine();
 
             var fields = GetFieldsFromMethod(method);

@@ -30,10 +30,10 @@ namespace EntJoy.ECS
                 if (!IsAlive(target.ToEntity()))
                     throw new InvalidDataException("Snapshot relationship target is missing or stale.");
                 var sources = index.PrepareAdd(type.Id, target.ToEntity());
-                if ((type.IsExclusiveRelation || type.IsExclusiveTarget) && sources.Count != 0)
+                if (type.IsExclusiveTarget && sources.Count != 0)
                     throw new InvalidDataException("Snapshot contains conflicting exclusive relationships.");
                 sources.Add(source);
-                if (!type.IsAcyclicRelation) continue;
+                if (!type.IsHierarchy) continue;
                 if (!acyclic.TryGetValue(type.Id, out var edges)) acyclic[type.Id] = edges = new();
                 edges.Add(source, target.ToEntity());
             }

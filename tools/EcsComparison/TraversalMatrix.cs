@@ -62,6 +62,9 @@ public struct EntChunkThreeCpp : IJobChunk
 
 public static class TraversalMatrix
 {
+    /// <summary>矩阵档位覆盖：块数对齐需要按实体数单独跑一档（65536 是单块上限）。</summary>
+    public static int[] EntityCountsOverride;
+
     public static void Run(bool verifyOnly, bool chunkJobOnly = false, bool queryOnly = false, bool rawChunkOnly = false)
     {
         CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
@@ -72,9 +75,9 @@ public static class TraversalMatrix
 
         int rounds = verifyOnly ? 1 : TraversalProtocol.Rounds;
         int first = rawChunkOnly ? 8 : chunkJobOnly ? 7 : 0;
-        int last = queryOnly ? 1 : chunkJobOnly ? 8 : 10;
+        int last = queryOnly ? 1 : chunkJobOnly ? 8 : 12;
         for (int round = 0; round < rounds; round++)
-        foreach (int count in verifyOnly ? new[] { 129 } : TraversalProtocol.EntityCounts)
+        foreach (int count in verifyOnly ? new[] { 129 } : (EntityCountsOverride ?? TraversalProtocol.EntityCounts))
         foreach (int components in new[] { 2, 3 })
         for (int index = first; index < last; index++)
             Measure(round, count, components, round % 2 == 0 ? index : first + last - 1 - index, verifyOnly);
@@ -82,6 +85,9 @@ public static class TraversalMatrix
 
     private static void Measure(int round, int count, int components, int method, bool verifyOnly)
     {
+        // Chunks 目前只有两组件形态；10 号臂（内联回调）已随接口删除，编号保留不复用。
+        if (method == 10) return;
+        if (method == 11 && components != 2) return;
         var probe = new SystemComparison { Components = components, EntityCount = count };
         try
         {
@@ -99,6 +105,7 @@ public static class TraversalMatrix
                 case 6: run = probe.EntJoyChunkJobCSharp; layer = "Chunk"; name = "IJobChunk.Run"; break;
                 case 7: run = probe.EntJoyChunkJobCpp; layer = "Chunk"; name = "IJobChunk.Run"; backend = "Cpp"; break;
                 case 8: run = probe.EntJoyRawChunks; layer = "Chunk"; name = "Archetype.ChunkSpan"; break;
+                case 11: run = probe.EntJoyChunksTwo; layer = "Chunk"; name = "Chunks"; break;
                 default: run = probe.ArchCachedChunks; layer = "Chunk"; framework = "Arch"; name = "CachedQuery.foreach"; break;
             }
             bool entJoy = framework == "EntJoy";

@@ -46,6 +46,10 @@ namespace EntJoy.ECS
         /// <summary>managed shared 类型个数（chunk 槽位只存索引，值在 EntityManager）。</summary>
         public readonly int ManagedSharedCount;
 
+        /// <summary>逐列是否关系列（索引同 <see cref="ComponentOffsets"/>）。关系列只能读，
+        /// 逐次访问的可写引取用要判它；放元数据里省掉回查 Archetype.Types。</summary>
+        internal readonly bool[] RelationColumns;
+
         public ChunkMetadata(
             Archetype archetype,
             int entityCapacity,
@@ -59,7 +63,8 @@ namespace EntJoy.ECS
             int sharedValuesOffset = -1,
             int[] sharedValueOffsets = null,
             int[] sharedValueSizes = null,
-            int managedSharedCount = 0)
+            int managedSharedCount = 0,
+            bool[] relationColumns = null)
         {
             Archetype = archetype;
             EntityCapacity = entityCapacity;
@@ -76,6 +81,7 @@ namespace EntJoy.ECS
             SharedValueOffsets = sharedValueOffsets;
             SharedValueSizes = sharedValueSizes;
             ManagedSharedCount = managedSharedCount;
+            RelationColumns = relationColumns ?? new bool[ComponentCount];
         }
 
         /// <summary>
@@ -110,6 +116,9 @@ namespace EntJoy.ECS
             int sharedValuesOffset = LayoutSharedValues(componentTypes, lineSize, ref offset,
                 sharedValueOffsets, sharedValueSizes, out int managedSharedCount);
 
+            var relationColumns = new bool[componentCount];
+            for (int i = 0; i < componentCount; i++) relationColumns[i] = componentTypes[i].IsRelation;
+
             return new ChunkMetadata(
                 archetype,
                 entityCapacity,
@@ -123,7 +132,8 @@ namespace EntJoy.ECS
                 sharedValuesOffset,
                 sharedValueOffsets,
                 sharedValueSizes,
-                managedSharedCount);
+                managedSharedCount,
+                relationColumns);
         }
 
         // 每列按缓存行对齐；相邻列起点对缓存检测周期取余相同时再错开一行，分散组索引。返回新的游标。

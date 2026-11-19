@@ -20,7 +20,7 @@ public struct ReadSnapshot : IJobParallelFor {
  public void Execute(int index) { Output[index] = Input[index].Id + Input.Length; }
 }");
             Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
-            Assert.Contains("Input_ptr[index].Id", result.Cpp);
+            Assert.Contains(backend == "Cpp" ? "Input_ptr[index].Id" : "(Input_ptr + __startIndex)[__batchRel].Id", result.Cpp);
             Assert.Contains(backend == "Cpp" ? "const InputValue" : "uniform const InputValue Input_ptr[]", result.Cpp);
             Assert.DoesNotContain("Input[index].Id", result.Cpp);
             Assert.DoesNotContain("ReadOnly__", result.Cpp);

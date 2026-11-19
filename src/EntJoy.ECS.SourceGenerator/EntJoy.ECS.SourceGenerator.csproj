@@ -12,6 +12,9 @@
     <!-- 编译器宿主自带 Roslyn：不得成为包依赖 -->
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" PrivateAssets="all" />
 
+    <!-- 生成物形态的单元测试直接驱动生成器，测的是同一份发射代码。 -->
+    <InternalsVisibleTo Include="EntJoy.ECS.Tests" />
+
     <!-- 诊断规则发布跟踪（消除 RS2008） -->
     <AdditionalFiles Include="AnalyzerReleases.Shipped.md" />
     <AdditionalFiles Include="AnalyzerReleases.Unshipped.md" />

@@ -17,6 +17,11 @@ namespace NativeTranspiler.Analyzer
 
         protected override void TranslateIfStatement(IfStatementSyntax ifStmt)
         {
+            // foreach 体里"只改同一个变量的 if/else-if 链"改写成 select 链：
+            //   掩码分支要为每条 if 生成 vmovmskps + 条件跳转；select 是纯值运算，无分支。
+            if (_insideForeach && TryEmitSelectChain(ifStmt))
+                return;
+
             var (innerCondition, hintKind) = ExtractHintFromCondition(ifStmt.Condition);
 
             if (hintKind != HintKind.None)
@@ -61,9 +66,109 @@ namespace NativeTranspiler.Analyzer
             base.TranslateIfStatement(ifStmt);
         }
 
-        protected override void TranslateLocalDeclaration(LocalDeclarationStatementSyntax localDecl)
+        /// <summary>
+        /// 把 `if (c1) X op1= e1; else if (c2) X op2= e2; … else X opN= eN;` 发射成
+        /// <c>X = select(c1, X op1 e1, select(c2, X op2 e2, …))</c>。
+        /// 只在 foreach 体内、且所有分支都是"对同一变量的单条赋值 + 纯值运算"时改写：
+        /// select 会同时求值两侧，所以带副作用或可能越界/除零的表达式一律不改。
+        /// </summary>
+        private bool TryEmitSelectChain(IfStatementSyntax ifStmt)
         {
-            if (localDecl.Declaration.Variables.Any(variable => variable.Initializer?.Value is RefExpressionSyntax))
+            var arms = new List<(ExpressionSyntax? Cond, string Target, ExpressionSyntax Rhs, string Op)>();
+            var node = ifStmt;
+            while (true)
+            {
+                if (!TryGetSelectArm(node.Condition, node.Statement, out var arm)) return false;
+                arms.Add(arm);
+
+                if (node.Else == null) break;
+                if (node.Else.Statement is IfStatementSyntax next) { node = next; continue; }
+                if (!TryGetSelectArm(null, node.Else.Statement, out var tail)) return false;
+                arms.Add(tail);
+                break;
+            }
+
+            if (arms.Count < 2) return false;
+            string target = arms[0].Target;
+            foreach (var arm in arms)
+                if (arm.Target != target)
+                    return false;
+
+            // 从最后一个分支往前套 select；没有 else 时默认保持原值。
+            int last = arms.Count - 1;
+            string stack = arms[last].Cond == null ? ApplyArm(arms[last], target) : target;
+            for (int i = arms[last].Cond == null ? last - 1 : last; i >= 0; i--)
+            {
+                string armText = ApplyArm(arms[i], target);
+                string condText = CaptureExpression(arms[i].Cond);
+                stack = $"select({condText}, {armText}, {stack})";
+            }
+
+            AppendIndent();
+            _builder.Append(target).Append(" = ").Append(stack).AppendLine(";");
+            return true;
+        }
+
+        private string ApplyArm((ExpressionSyntax? Cond, string Target, ExpressionSyntax Rhs, string Op) arm, string target)
+        {
+            string rhs = CaptureExpression(arm.Rhs);
+            if (arm.Op == "=") return rhs;
+            // `+=` → `+`：select 里要的是值表达式，不能写赋值表达式（两侧都会求值）。
+            // 右操作数必须加括号：`sum - x >> 3` 会按 `(sum - x) >> 3` 解析，与原意 `sum - (x >> 3)` 不同。
+            return $"{target} {arm.Op.Substring(0, arm.Op.Length - 1)} ({rhs})";
+        }
+
+        /// <summary>识别"单条对简单左值的赋值"，且左值唯一、表达式可安全重复求值。</summary>
+        private bool TryGetSelectArm(ExpressionSyntax? condition, StatementSyntax statement,
+            out (ExpressionSyntax? Cond, string Target, ExpressionSyntax Rhs, string Op) arm)
+        {
+            arm = default;
+            if (condition != null && !IsSelectSafeExpression(condition)) return false;
+
+            ExpressionStatementSyntax? exprStmt = statement switch
+            {
+                ExpressionStatementSyntax direct => direct,
+                BlockSyntax block when block.Statements.Count == 1 => block.Statements[0] as ExpressionStatementSyntax,
+                _ => null
+            };
+            if (exprStmt?.Expression is not AssignmentExpressionSyntax assignment) return false;
+            if (assignment.Left is not IdentifierNameSyntax lvalue) return false;
+            if (!IsSelectSafeExpression(assignment.Right)) return false;
+
+            string op = assignment.OperatorToken.Text;
+            if (op is not ("=" or "+=" or "-=" or "*=" or "^=" or "&=" or "|=")) return false;
+
+            arm = (condition, lvalue.Identifier.Text, assignment.Right, op);
+            return true;
+        }
+
+        /// <summary>
+        /// select 两侧都会求值：只放行纯值运算。调用、元素访问、除法/取模、自增自减、
+        /// 赋值、条件运算符都可能带来副作用、越界或除零陷阱，一律拒绝。
+        /// </summary>
+        private static bool IsSelectSafeExpression(ExpressionSyntax expr)
+        {
+            foreach (var node in expr.DescendantNodesAndSelf())
+            {
+                switch (node)
+                {
+                    case InvocationExpressionSyntax:
+                    case ElementAccessExpressionSyntax:
+                    case AssignmentExpressionSyntax:
+                    case PostfixUnaryExpressionSyntax postfix when postfix.IsKind(SyntaxKind.PostIncrementExpression)
+                        || postfix.IsKind(SyntaxKind.PostDecrementExpression):
+                    case PrefixUnaryExpressionSyntax prefix when prefix.IsKind(SyntaxKind.PreIncrementExpression)
+                        || prefix.IsKind(SyntaxKind.PreDecrementExpression):
+                    case BinaryExpressionSyntax bin when bin.IsKind(SyntaxKind.DivideExpression)
+                        || bin.IsKind(SyntaxKind.ModuloExpression):
+                        return false;
+                }
+            }
+            return true;
+        }
+
+        protected override void TranslateLocalDeclaration(LocalDeclarationStatementSyntax localDecl)
+        {            if (localDecl.Declaration.Variables.Any(variable => variable.Initializer?.Value is RefExpressionSyntax))
             {
                 AppendIndent();
                 _builder.AppendLine($"// {UnsupportedMarkers.Stmt}ISPC_RefLocal");

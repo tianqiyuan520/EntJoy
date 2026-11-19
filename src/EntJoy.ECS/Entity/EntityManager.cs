@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
@@ -157,6 +157,29 @@ namespace EntJoy.ECS
         private readonly Dictionary<int, List<JobHandle>> _archetypeJobs = new(); // Per-Archetype Job Tracking
         private readonly Dictionary<JobHandle, ComponentType[]> _jobWrittenComponents = new(); // Job → written components
         private readonly object _structuralLock = new();  // 结构变更互斥（Monitor 可重入，回调内嵌套也安全）
+        // 单线程 World 跳过结构锁：调用方声明不跨线程使用，Observer 重入由调用栈保证。
+        private readonly bool _threadSafe;
+
+        // 显式延迟作用域：非 null 时结构变更写入该队列，由作用域结束统一回放。
+        private DeferredCommandBuffer _deferring;
+        private int _deferDepth;
+
+        internal DeferredCommandBuffer Deferring => _deferring;
+
+        internal void EnterDeferred(DeferredCommandBuffer buffer)
+        {
+            _deferring = buffer;
+            _deferDepth++;
+        }
+
+        internal bool ExitDeferred()
+        {
+            if (_deferDepth == 0) return false;
+            if (--_deferDepth != 0) return false;
+            _deferring = null;
+            return true;
+        }
+
 
         private readonly struct StructuralScope : System.IDisposable
         {
@@ -167,11 +190,14 @@ namespace EntJoy.ECS
 
         private StructuralScope EnterStructural()
         {
-            System.Threading.Monitor.Enter(_structuralLock);
+            if (_threadSafe) System.Threading.Monitor.Enter(_structuralLock);
             return new StructuralScope(this);
         }
 
-        private void ExitStructural() => System.Threading.Monitor.Exit(_structuralLock);
+        private void ExitStructural()
+        {
+            if (_threadSafe) System.Threading.Monitor.Exit(_structuralLock);
+        }
 
         // Native SendEvent 异步 drain 待处理列表（contextPtr, jobType, world）——记录 world 归属，
         // 避免多 World 下依赖全局 DefaultWorld 导致事件写错 EventStream 或丢失。
@@ -190,12 +216,13 @@ namespace EntJoy.ECS
 
         // 关系反向索引（target.Id → sources），Add/Remove/级联删除同步维护
         private RelationIndex _relationIndex = new();
-        // 多实例关系（[MultiRelation]）正向存储（source → targets 列表）；反向复用 _relationIndex
+        // 多实例关系（[RelationshipComponent(Multiple = true)]）正向存储（source → targets 列表）；反向复用 _relationIndex
         private RelationListStore _relationListStore = new();
 
 
-        public EntityManager()
+        public EntityManager(bool threadSafe = true)
         {
+            _threadSafe = threadSafe;
             entities = new EntityIndexInWorld[32];  // 初始实体数组
             archetypeMap = new Dictionary<int, Archetype>(); // 初始化原型映射（哈希 -> 原型）
             allArchetypes = new Archetype[8];  // 初始原型数组
@@ -214,6 +241,15 @@ namespace EntJoy.ECS
         /// </summary>
         private Archetype GetOrCreateArchetype(Span<ComponentType> types)  // 获取或创建原型方法
         {
+            // 原型数量少时线性比对比"哈希 + 字典探测 + 集合比较"便宜，且不引入任何缓存状态。
+            if (archetypeCount <= 8)
+            {
+                for (int i = 0; i < archetypeCount; i++)
+                {
+                    var existing = allArchetypes[i];
+                    if (existing != null && Utils.SetEquals(existing.Types, types)) return existing;
+                }
+            }
             // 查找按集合语义：与顺序无关的哈希 + 无序比较；哈希命中且集合相同才算命中。
             var hash = Utils.CalculateUnorderedHash(types);
             if (archetypeMap.TryGetValue(hash, out var cached) && Utils.SetEquals(cached.Types, types))

@@ -196,7 +196,7 @@ namespace EntJoy.ECS.Tests
         [Fact]
         public void QueryIteration_StructuralChange_Throws()
         {
-            var world = new World("Iter");
+            using var world = new World("Iter");
             var em = world.EntityManager;
             em.NewEntity(typeof(Position), typeof(Velocity));
             var e2 = em.NewEntity(typeof(Position), typeof(Velocity));
@@ -208,8 +208,41 @@ namespace EntJoy.ECS.Tests
                     em.DestroyEntity(e2);  // 迭代中 swap-pop 结构变更
                 }
             });
+        }
 
-            world.Dispose();
+        [Fact]
+        public void BeginDeferred_DefersStructuralChangeUntilScopeEnds()
+        {
+            using var world = new World("DeferredScope");
+            var em = world.EntityManager;
+            em.NewEntity(typeof(Position), typeof(Velocity));
+            var doomed = em.NewEntity(typeof(Position), typeof(Velocity));
+
+            using (world.BeginDeferred())
+            {
+                em.DestroyEntity(doomed);
+                int inside = 0;
+                foreach (var r in world.Query<Position, Velocity>()) inside++;
+                Assert.Equal(2, inside);   // 作用域内变更未生效
+            }
+
+            int after = 0;
+            foreach (var r in world.Query<Position, Velocity>()) after++;
+            Assert.Equal(1, after);        // 离开作用域后已回放
+        }
+
+        [Fact]
+        public void BeginDeferred_CreateEntityThrowsWithGuidance()
+        {
+            using var world = new World("DeferredCreate");
+            var em = world.EntityManager;
+
+            using (world.BeginDeferred())
+            {
+                var error = Assert.Throws<InvalidOperationException>(
+                    () => em.NewEntity(typeof(Position), typeof(Velocity)));
+                Assert.Contains("DeferredCommandBuffer", error.Message);
+            }
         }
     }
 }

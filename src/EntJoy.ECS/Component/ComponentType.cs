@@ -14,13 +14,12 @@ namespace EntJoy.ECS
         public bool IsEnableable => ComponentTypeManager.GetIsEnableable(Id);
         public bool IsShared => ComponentTypeManager.GetIsShared(Id);
         public bool IsRelation => ComponentTypeManager.GetIsRelation(Id);
-        public bool IsAcyclicRelation => ComponentTypeManager.GetIsAcyclicRelation(Id);
-        public bool IsExclusiveRelation => ComponentTypeManager.GetIsExclusiveRelation(Id);
+        public bool IsHierarchy => ComponentTypeManager.GetIsHierarchy(Id);
         public bool IsMultiRelation => ComponentTypeManager.GetIsMultiRelation(Id);
-        /// <summary>定长多槽列槽位数（[MultiRelation(MaxSlots=N)]，N≥2）；0 = 托管列表模式。</summary>
+        /// <summary>定长多槽列槽位数（[RelationshipComponent(MaxTargets=N)]，N≥2）；0 = 托管列表模式。</summary>
         public int MultiRelationMaxSlots => ComponentTypeManager.GetMultiRelationMaxSlots(Id);
         public bool IsExclusiveTarget => ComponentTypeManager.GetIsExclusiveTarget(Id);
-        public bool CascadeOnTargetDeleted => ComponentTypeManager.GetCascadeOnTargetDeleted(Id);
+        public bool DeleteWithTarget => ComponentTypeManager.GetDeleteWithTarget(Id);
         public bool IsDisposable => ComponentTypeManager.GetIsDisposable(Id);
         public bool IsCopyable => ComponentTypeManager.GetIsCopyable(Id);
 

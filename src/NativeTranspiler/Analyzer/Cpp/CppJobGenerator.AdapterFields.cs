@@ -1,5 +1,4 @@
 using Microsoft.CodeAnalysis;
-using System.Linq;
 using System.Text;
 using NativeTranspiler.Analyzer.Common;
 
@@ -11,42 +10,37 @@ namespace NativeTranspiler.Analyzer
         private static void AppendChunkAdapterFields(StringBuilder sb, INamedTypeSymbol jobStruct,
             IFieldSymbol? mask, FieldLoopUse loopUse, bool mutableLengths = false)
         {
-            var fields = jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic).ToArray();
-            int currentOffset = 0;
-            foreach (var field in fields)
+            var slots = BuildFieldLayout(jobStruct);
+            foreach (var slot in slots)
             {
-                int offset = CalculateFieldOffset(field, ref currentOffset);
-                if (NativeTranspiler.IsEntJoyNativeContainerType(field.Type))
+                string name = slot.Field.Name;
+                string address = CppIntegerSemantics.CastOperand(
+                    CppIntegerSemantics.JobAddress("__jobContext", slot.Offset));
+                switch (slot.Kind)
                 {
-                    string elementType = GetCppElementType(field.Type);
-                    if (NativeTranspiler.IsEntJoyContainerNamed(field.Type, Config.NativeList))
-                        sb.AppendLine($"    auto* {field.Name}_listData = *(EntJoy::Collections::UnsafeList<{elementType}>**)(__jobContext + {offset});");
-                    else
-                    {
-                        sb.AppendLine($"    auto* {field.Name}_ptr = *({elementType}**)(__jobContext + {offset});");
+                    case FieldKind.NativeList:
+                        sb.AppendLine($"    auto* {name}_listData = *(EntJoy::Collections::UnsafeList<{slot.ElementType}>**){address};");
+                        break;
+                    case FieldKind.Container:
+                        sb.AppendLine($"    auto* {name}_ptr = *({slot.ElementType}**){address};");
                         string reference = mutableLengths ? "&" : "";
-                        sb.AppendLine($"    int{reference} {field.Name}_length = *(int*)(__jobContext + {offset + 8});");
-                    }
-                }
-                else
-                {
-                    string cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
-                    string dereference = field.Type is IPointerTypeSymbol ? "*" : "";
-                    sb.AppendLine($"    auto* {field.Name}_ptr = {dereference}({cppType}*)(__jobContext + {offset});");
+                        sb.AppendLine($"    int{reference} {name}_length = *(int*){CppIntegerSemantics.CastOperand(CppIntegerSemantics.JobAddress("__jobContext", slot.LengthOffset))};");
+                        break;
+                    default:
+                        string dereference = slot.Kind == FieldKind.Pointer ? "*" : "";
+                        sb.AppendLine($"    auto* {name}_ptr = {dereference}({slot.CppType}*){address};");
+                        break;
                 }
             }
-            foreach (var field in fields)
+            foreach (var slot in slots)
             {
-                if (NativeTranspiler.IsEntJoyContainerNamed(field.Type, Config.NativeList))
-                {
-                    string elementType = GetCppElementType(field.Type);
-                    sb.AppendLine($"    EntJoy::Collections::UnsafeList<{elementType}>& {field.Name} = *{field.Name}_listData;");
-                }
+                if (slot.Kind == FieldKind.NativeList)
+                    sb.AppendLine($"    EntJoy::Collections::UnsafeList<{slot.ElementType}>& {slot.Field.Name} = *{slot.Field.Name}_listData;");
             }
-            foreach (var field in fields)
+            foreach (var slot in slots)
             {
-                if (!NativeTranspiler.IsEntJoyNativeContainerType(field.Type) && field.Type is not IPointerTypeSymbol)
-                    AppendMaskFieldBinding(sb, field, mask, loopUse.Written.Contains(field.Name));
+                if (slot.Kind == FieldKind.Scalar)
+                    AppendMaskFieldBinding(sb, slot.Field, mask, loopUse.Written.Contains(slot.Field.Name));
             }
         }
     }

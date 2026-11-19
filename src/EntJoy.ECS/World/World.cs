@@ -21,15 +21,35 @@ namespace EntJoy.ECS
         public EntityManager _entityManager;
         public ref EntityManager EntityManager => ref _entityManager;
 
+        private DeferredCommandBuffer _deferredBuffer;
+
+        /// <summary>
+        /// 开启延迟作用域：作用域内的结构变更写入命令队列，离开作用域时统一回放。
+        /// 用 <c>using</c> 保证 Dispose 一定执行；嵌套时只有最外层回放。
+        /// </summary>
+        public DeferredScope BeginDeferred()
+        {
+            _deferredBuffer ??= new DeferredCommandBuffer();
+            _entityManager.EnterDeferred(_deferredBuffer);
+            return new DeferredScope(this, _deferredBuffer);
+        }
+
+        internal void EndDeferred(DeferredCommandBuffer buffer)
+        {
+            if (!_entityManager.ExitDeferred()) return;
+            if (buffer.CommandCount == 0) return;
+            buffer.Playback(_entityManager);
+        }
+
         private bool _disposed;
 
         // Event Channel
         private readonly ConcurrentDictionary<Type, object> _eventStreams = new();
 
-        public World(string worldName = "Default")
+        public World(string worldName = "Default", bool threadSafe = true)
         {
             Name = worldName;
-            _entityManager = new EntityManager();
+            _entityManager = new EntityManager(threadSafe);
 
             // 线程安全地设置 DefaultWorld：只有第一个 World 会成为默认
             lock (_defaultLock)

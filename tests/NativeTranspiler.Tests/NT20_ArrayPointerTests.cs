@@ -29,7 +29,7 @@ using NativeTranspiler; using EntJoy.Collections; using EntJoy.JobSystem;
         public void StableHandles_CachePointers_WithoutAliasAssumptions(string body)
         {
             var cpp = Emit(body);
-            Assert.Contains("int* const A_ptr = *(int**)((char*)__job + 0);", cpp);
+            Assert.Contains("int* const A_ptr = *(int**)__job;", cpp);
             Assert.Contains("int* const B_ptr = *(int**)((char*)__job + 16);", cpp);
             Assert.DoesNotContain("__restrict", cpp);
         }

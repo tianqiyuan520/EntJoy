@@ -78,16 +78,23 @@ namespace NativeTranspiler.Analyzer
         {
             string idxExpr = TranslateExpression(indexSyntax ?? assign.Left);
             string rhsExpr = TranslateExpression(assign.Right);
+            // 带对象初始化器的结构体整体赋值（`items[i] = new T { ... }`）没有字段级展开，
+            // 落下去只会得到一条 `static_cast<T>(int())` 之类静默错值；明确标记为不支持。
+            if (assign.Right is ObjectCreationExpressionSyntax { Initializer: not null })
+                return $"/*{UnsupportedMarkers.Expr}SIMD_ObjectInitializerStore*/ 0";
             VarKind idxKind = _varAnalyzer.ClassifyExpression(indexSyntax ?? assign.Left);
             VarKind rhsKind = _varAnalyzer.ClassifyExpression(assign.Right);
             string extractFn = elemType == "float" ? "n_extract_lane_f32" : "n_extract_lane_epi32";
             string storeFnScalar = elemType == "float" ? "n_store_ps" : "n_store_epi32";
             string setFnScalar = elemType == "float" ? "n_set1_ps" : "n_set1_epi32";
 
-            // 非 float/int 元素（byte/sbyte/float2/结构体…）：向量 store 的 intrinsic 签名只覆盖
-            //   float*/int*。这里统一走"逐 lane 标量写"，按元素类型正确转换指针，
-            //   掩码语义与其他路径一致（不再生成 `(int*)(byte_ptr)[i] = <float2>` 这类非法赋值）。
-            bool isNarrowElem = elemType != "float" && elemType != "int";
+            // 元素类别统一决定写回路径：32 位标量走向量 store（连续或 scatter），
+            //   窄整数走"连续 pack store / 逐 lane"，pair 与结构体仍逐 lane。
+            SimdElemClass elemClass = SimdVectorTypes.ClassifyElem(elemType);
+            bool isNarrowElem = elemClass != SimdElemClass.Lane32;
+            // 2 分量向量元素：写回要按两个分量各自取 lane 再构造（float2/int2/uint2 同形）。
+            bool pairElem = SimdVectorTypes.IsPair(elemType);
+            string pairExtract = SimdVectorTypes.IsFloat2(elemType) ? "n_extract_lane_f32" : "n_extract_lane_epi32";
 
             // NT-12（Critical）：复合赋值必须"读-改-写"。
             //   若完全忽略 `assign.OperatorToken`，按普通 store 发 `addr = rhs`
@@ -97,44 +104,91 @@ namespace NativeTranspiler.Analyzer
             if (compoundOp != "=")
             {
                 if (IsStructNativeArrayType(elemType))
-                    throw new System.NotSupportedException(
-                        $"复合赋值不支持结构体元素：`{elemType} {compoundOp}` —— 请拆成两步（先读局部变量、再整体写回）。");
+                    return $"/*{UnsupportedMarkers.Expr}SIMD_StructCompoundAssign*/ 0";
                 string elemPtr = $"(({elemType}*)({basePtr}))";
-                bool narrowedCmp = _currentMask != "simd_mask::all_true()";
+                bool narrowedCmp = !_currentMask.IsAllTrue;
+                // 窄整数 + 连续下标 + 无掩码 + 均匀标量 RHS：直接在元素宽度上运算（不扩宽/打包）。
+                //   只放行保持回绕语义的 += -= &= |= ^=；*= 在字节上没有原生指令，仍走扩宽路径。
+                string packedOp = compoundOp switch
+                {
+                    "+=" => "add", "-=" => "sub", "&=" => "and", "|=" => "or", "^=" => "xor", _ => null
+                };
+                if (elemClass == SimdElemClass.NarrowInt && packedOp != null
+                    && !narrowedCmp && _returnedMaskVar.IsEmpty
+                    && rhsKind < VarKind.Varying && indexSyntax != null
+                    && TryResolveContiguousOffset(indexSyntax, out string packedOffset))
+                {
+                    int bits = elemType is "unsigned char" or "signed char" ? 8 : 16;
+                    string ptr = $"(({elemType}*)({basePtr}) + {packedOffset})";
+                    return $"n_store_p{bits}({ptr}, n_{packedOp}_p{bits}(n_load_p{bits}({ptr}), n_set1_p{bits}((int)({rhsExpr}))));";
+                }
+                // 窄整数 + 连续下标 + 无掩码：扩宽 load → 运算 → pack store。
+                //   移位复合（<<=/>>=）不走这里：右移在 uint 上用的是专用 helper，不保证有运算符重载。
+                if (elemClass == SimdElemClass.NarrowInt && !narrowedCmp && _returnedMaskVar.IsEmpty
+                    && compoundOp is "+=" or "-=" or "*=" or "&=" or "|=" or "^="
+                    && indexSyntax != null
+                    && SimdVectorTypes.NarrowLoadFn(elemType) is { } widenFn
+                    && SimdVectorTypes.NarrowStoreFn(elemType) is { } packFn
+                    && TryResolveContiguousOffset(indexSyntax, out string compoundOffset))
+                {
+                    string opText = compoundOp.Substring(0, compoundOp.Length - 1);
+                    string loaded = $"simd_value<int>{{ {widenFn}((const {elemType}*)({basePtr}) + {compoundOffset}) }}";
+                    return $"{{ simd_value<int> __narrow = {loaded}; {packFn}(({elemType}*)({basePtr}) + {compoundOffset}, (__narrow {opText} ({rhsExpr})).v); }}";
+                }
                 if (idxKind >= VarKind.Varying)
                 {
                     string laneRhs = rhsKind >= VarKind.Varying
                         ? ((elemType == "float" && IsInt32Expr(assign.Right))
-                            ? $"n_extract_lane_i2f(({rhsExpr}).v,__l)"
-                            : $"{extractFn}(({rhsExpr}).v,__l)")
+                            ? $"n_extract_lane_i2f({CppIntegerSemantics.MemberOperand(rhsExpr)}.v,__l)"
+                            : $"{extractFn}({CppIntegerSemantics.MemberOperand(rhsExpr)}.v,__l)")
                         : rhsExpr;
                     string guardCmp = narrowedCmp
-                        ? $"if((n_mask_to_bitmask(({_currentMask}).m)&(1<<__l))!=0)"
+                        ? $"if((n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m)&(1<<__l))!=0)"
                         : "";
-                    return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{guardCmp}{elemPtr}[n_extract_lane_epi32(({idxExpr}).v,__l)] {compoundOp} {laneRhs};}}}}";
+                    return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{guardCmp}{elemPtr}[n_extract_lane_epi32({CppIntegerSemantics.MemberOperand(idxExpr)}.v,__l)] {compoundOp} {laneRhs};}}}}";
                 }
                 return $"{elemPtr}[{idxExpr}] {compoundOp} {rhsExpr};";
             }
 
             if (isNarrowElem)
             {
-                bool narrowed = _currentMask != "simd_mask::all_true()";
-                string guard = narrowed ? $"if((n_mask_to_bitmask(({_currentMask}).m)&(1<<__l))!=0)" : "";
+                // 窄整数 + 连续下标 + 无掩码：整宽 pack store（截断取低位，等价于 C# 的 (byte)/(short)）。
+                if (elemClass == SimdElemClass.NarrowInt
+                    && _currentMask.IsAllTrue && _returnedMaskVar.IsEmpty
+                    && indexSyntax != null
+                    && SimdVectorTypes.NarrowStoreFn(elemType) is { } packFn
+                    && TryResolveContiguousOffset(indexSyntax, out string packOffset))
+                {
+                    string packValue = rhsKind >= VarKind.Varying
+                        ? $"{CppIntegerSemantics.MemberOperand(rhsExpr)}.v"
+                        : $"n_set1_epi32((int)({rhsExpr}))";
+                    return $"{packFn}(({elemType}*)({basePtr}) + {packOffset}, {packValue})";
+                }
+                bool narrowed = !_currentMask.IsAllTrue;
+                string guard = narrowed ? $"if((n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m)&(1<<__l))!=0)" : "";
                 string ep = $"(({elemType}*)({basePtr}))";
                 // 结构体元素（float2/int2/自定义）用构造语法；内置标量用 static_cast。
                 // ⚠ `(T){v}` 是 C 复合字面量语法，在 C++ 里会被读成"转型到指针类型"而报错。
                 // ⚠ 多词类型名（`unsigned char`）不能用 `unsigned char(v)` —— C++ 把它读成
                 //    `unsigned` 后跟 `char(v)`，报 "expected '(' for function-style cast"。
                 bool structElem = IsStructNativeArrayType(elemType);
+                if (pairElem && rhsKind >= VarKind.Varying)
+                {
+                    string pairOperand =
+                        $"{elemType}({pairExtract}({CppIntegerSemantics.MemberOperand(rhsExpr)}.x.v,__l), {pairExtract}({CppIntegerSemantics.MemberOperand(rhsExpr)}.y.v,__l))";
+                    if (idxKind >= VarKind.Varying)
+                        return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{guard}{ep}[n_extract_lane_epi32({CppIntegerSemantics.MemberOperand(idxExpr)}.v,__l)] = {pairOperand};}}}}";
+                    return $"{ep}[{idxExpr}] = {elemType}({pairExtract}({CppIntegerSemantics.MemberOperand(rhsExpr)}.x.v,0), {pairExtract}({CppIntegerSemantics.MemberOperand(rhsExpr)}.y.v,0))";
+                }
                 if (idxKind >= VarKind.Varying)
                 {
                     string rhsOperand = rhsKind >= VarKind.Varying
-                        ? (structElem ? $"{elemType}({extractFn}(({rhsExpr}).v,__l))" : $"static_cast<{elemType}>({extractFn}(({rhsExpr}).v,__l))")
+                        ? (structElem ? $"{elemType}({extractFn}({CppIntegerSemantics.MemberOperand(rhsExpr)}.v,__l))" : $"static_cast<{elemType}>({extractFn}({CppIntegerSemantics.MemberOperand(rhsExpr)}.v,__l))")
                         : (structElem ? $"{elemType}({rhsExpr})" : $"static_cast<{elemType}>({rhsExpr})");
-                    return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{guard}{ep}[n_extract_lane_epi32(({idxExpr}).v,__l)] = {rhsOperand};}}}}";
+                    return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{guard}{ep}[n_extract_lane_epi32({CppIntegerSemantics.MemberOperand(idxExpr)}.v,__l)] = {rhsOperand};}}}}";
                 }
                 string uniformRhs = rhsKind >= VarKind.Varying
-                    ? (structElem ? $"{elemType}({extractFn}(({rhsExpr}).v,0))" : $"static_cast<{elemType}>({extractFn}(({rhsExpr}).v,0))")
+                    ? (structElem ? $"{elemType}({extractFn}({CppIntegerSemantics.MemberOperand(rhsExpr)}.v,0))" : $"static_cast<{elemType}>({extractFn}({CppIntegerSemantics.MemberOperand(rhsExpr)}.v,0))")
                     : (structElem ? $"{elemType}({rhsExpr})" : $"static_cast<{elemType}>({rhsExpr})");
                 return $"{ep}[{idxExpr}] = {uniformRhs}";
             }
@@ -144,22 +198,22 @@ namespace NativeTranspiler.Analyzer
                     // Conditional (if/else) store: when the current mask is narrowed,
                     //   ANY store (contiguous or not, uniform or varying rhs) must be
                     //   and later branches overwrite earlier ones.
-                    bool inNarrowedContext = _currentMask != "simd_mask::all_true()";
+                    bool inNarrowedContext = !_currentMask.IsAllTrue;
                     if (inNarrowedContext)
                     {
                         // rhs may be uniform (scalar literal) or varying (SIMD expr).
                         // Normalize to a SIMD expression so per-lane extract works.
                         string rhsSimdExpr;
-                        if (rhsKind < VarKind.Varying && !rhsExpr.StartsWith("n_") && !rhsExpr.Contains(".v"))
+                        if (rhsKind < VarKind.Varying && (SimdExprShapes.Of(rhsExpr) & (SimdExprTraits.Intrinsic | SimdExprTraits.LaneAccess)) == 0)
                             rhsSimdExpr = $"simd_value<{elemType}>{{ {setFnScalar}({rhsExpr}) }}";
                         else
                             rhsSimdExpr = rhsExpr;
                         // E7 int→float store fix: use n_extract_lane_i2f for numeric conversion
                         //   (extract int lane, convert to float — not bit reinterpretation)
                         string extractExpr = (elemType == "float" && IsInt32Expr(assign.Right))
-                            ? $"n_extract_lane_i2f(({rhsSimdExpr}).v,__l)"
+                            ? $"n_extract_lane_i2f({CppIntegerSemantics.MemberOperand(rhsSimdExpr)}.v,__l)"
                             : $"{extractFn}({rhsSimdExpr}.v,__l)";
-                        return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{basePtr}[n_extract_lane_epi32({idxExpr}.v,__l)]={extractExpr};}}}}}}";
+                        return $"{{int __sg=n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{basePtr}[n_extract_lane_epi32({idxExpr}.v,__l)]={extractExpr};}}}}}}";
                     }
                     // NT-01(a)：无掩码连续 store 的前提是"索引可证明等于 SIMD 索引变量本身"
                     //   （`v_i`，或 `<uniform> + v_i` 且批内循环变量已知）。在任意 varying
@@ -170,18 +224,12 @@ namespace NativeTranspiler.Analyzer
                     string contOffset = null;
                     if (!string.IsNullOrEmpty(_batchLoopVar))
                     {
-                        if (idxExpr == _simdIndexVar)
-                            contBase = _batchLoopVar;
-                        else
+                        // 连续下标：`v_i` / `常量 + v_i` / `v_i ± 标量`（与 load 侧共用同一判定）。
+                        if (indexSyntax != null && TryResolveContiguousOffset(indexSyntax, out string resolvedOffset))
                         {
-                            string suffix = $"+ {_simdIndexVar}";
-                            if (idxExpr.EndsWith(suffix))
-                                contBase = idxExpr.Substring(0, idxExpr.Length - suffix.Length).Trim();
-                            else if (idxExpr.EndsWith($"+ {_simdIndexVar})"))
-                                contBase = idxExpr.Substring(0, idxExpr.Length - ($"+ {_simdIndexVar})").Length).Trim().TrimStart('(');
+                            contBase = _batchLoopVar;
+                            contOffset = resolvedOffset;
                         }
-                        if (contBase != null)
-                            contOffset = contBase == _batchLoopVar ? contBase : $"({contBase}) + {_batchLoopVar}";
                     }
                     else if (idxExpr == _simdIndexVar && _batchOffsetVar != SimdControlFlowGenerator.UnknownBatchOffset)
                     {
@@ -204,28 +252,30 @@ namespace NativeTranspiler.Analyzer
                         // when _returnedMaskVar is set (batch body has `return`), use per-lane
                         //   masked store to avoid overwriting lanes that already returned with their result.
                         //   Only write to non-returned lanes (complement of _returnedMaskVar).
-                        if (!string.IsNullOrEmpty(_returnedMaskVar) && contBase == _batchLoopVar)
+                        if (!_returnedMaskVar.IsEmpty && contBase == _batchLoopVar)
                         {
                             string rhsSimdExpr;
-                            if (rhsKind < VarKind.Varying && !rhsExpr.StartsWith("n_") && !rhsExpr.Contains(".v"))
+                            if (rhsKind < VarKind.Varying && (SimdExprShapes.Of(rhsExpr) & (SimdExprTraits.Intrinsic | SimdExprTraits.LaneAccess)) == 0)
                                 rhsSimdExpr = $"simd_value<{elemType}>{{ {setFnScalar}({rhsExpr}) }}";
                             else
                                 rhsSimdExpr = rhsExpr;
-                            return $"{{int __sg=n_mask_to_bitmask(n_not_mask({_returnedMaskVar}.m));for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{basePtr}[n_extract_lane_epi32({idxExpr}.v,__l)]={(elemType == "float" && IsInt32Expr(assign.Right) ? $"n_extract_lane_i2f(({rhsSimdExpr}).v,__l)" : $"{extractFn}({rhsSimdExpr}.v,__l)")};}}}}}}";
+                            return $"{{int __sg=n_mask_to_bitmask(n_not_mask({_returnedMaskVar}.m));for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{basePtr}[n_extract_lane_epi32({idxExpr}.v,__l)]={(elemType == "float" && IsInt32Expr(assign.Right) ? $"n_extract_lane_i2f({CppIntegerSemantics.MemberOperand(rhsSimdExpr)}.v,__l)" : $"{extractFn}({rhsSimdExpr}.v,__l)")};}}}}}}";
                         }
                         string storeFn = elemType == "float" ? "n_store_ps" : "n_store_epi32";
+                        // uint 与 int 同宽同布局：store intrinsic 只收 int*，按位重解释即可。
+                        string storeBase = elemType == "unsigned int" ? $"(int*)({basePtr})" : basePtr;
                         // 均匀 RHS + 连续索引：整宽 set1 + 无掩码 store（真正的向量化路径）
                         if (rhsKind < VarKind.Varying)
-                            return $"{storeFnScalar}({basePtr} + {contOffset}, {setFnScalar}({rhsExpr}))";
+                            return $"{storeFnScalar}({storeBase} + {contOffset}, {setFnScalar}({rhsExpr}))";
                         // int→float 跨类型写回：向量转换 + 向量 store（避免 scatter）
                         if (elemType == "float" && IsInt32Expr(assign.Right))
-                            return $"{storeFn}({basePtr} + {contOffset}, n_cvtepi32_ps({rhsExpr}.v))";
-                        return $"{storeFn}({basePtr} + {contOffset}, {rhsExpr}.v)";
+                            return $"{storeFn}({storeBase} + {contOffset}, n_cvtepi32_ps({rhsExpr}.v))";
+                        return $"{storeFn}({storeBase} + {contOffset}, {rhsExpr}.v)";
                     }
 
                     // 非连续 varying 下标：逐 lane scatter。
                     if (rhsKind >= VarKind.Varying)
-                        return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{basePtr}[n_extract_lane_epi32({idxExpr}.v,__l)]={(elemType == "float" && IsInt32Expr(assign.Right) ? $"n_extract_lane_i2f(({rhsExpr}).v,__l)" : $"{extractFn}({rhsExpr}.v,__l)")};}}}}";
+                        return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{basePtr}[n_extract_lane_epi32({idxExpr}.v,__l)]={(elemType == "float" && IsInt32Expr(assign.Right) ? $"n_extract_lane_i2f({CppIntegerSemantics.MemberOperand(rhsExpr)}.v,__l)" : $"{extractFn}({rhsExpr}.v,__l)")};}}}}";
                     // 均匀标量 RHS + 非连续 varying 下标：把标量写到每个 lane 各自的地址
                     // （旧代码在这里错误地发整宽连续 store）。
                     return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{basePtr}[n_extract_lane_epi32({idxExpr}.v,__l)]={rhsExpr};}}}}";
@@ -261,13 +311,13 @@ namespace NativeTranspiler.Analyzer
                 laneValue = pair
                     ? $"{fieldType}{{{extract}(({rhs}).x.v,__l),{extract}(({rhs}).y.v,__l)}}"
                     : fieldType == "float" && IsInt32Expr(assign.Right)
-                        ? $"n_extract_lane_i2f(({rhs}).v,__l)" : $"{extract}(({rhs}).v,__l)";
-            string target = $"{array}_ptr[n_extract_lane_epi32(({index}).v,__l)].{field}";
+                        ? $"n_extract_lane_i2f({CppIntegerSemantics.MemberOperand(rhs)}.v,__l)" : $"{extract}({CppIntegerSemantics.MemberOperand(rhs)}.v,__l)";
+            string target = $"{array}_ptr[n_extract_lane_epi32({CppIntegerSemantics.MemberOperand(index)}.v,__l)].{field}";
             string write = fieldType == "int" && op is "+=" or "-=" or "*="
                 ? $"{target} = (int)((unsigned){target} {op[0]} (unsigned)({laneValue}));"
                 : $"{target} {op} {laneValue};";
-            string guard = _currentMask == "simd_mask::all_true()" ? ""
-                : $"if(n_mask_to_bitmask(({_currentMask}).m)&(1<<__l))";
+            string guard = _currentMask.IsAllTrue ? ""
+                : $"if(n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m)&(1<<__l))";
             return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{guard}{{{write}}}}}}}";
         }
 
@@ -298,7 +348,7 @@ namespace NativeTranspiler.Analyzer
                 string arrName2 = id2.Identifier.Text;
                 if (_nativeArrayParams.TryGetValue(arrName2, out var saElemType)
                     && saElemType != "float" && saElemType != "int"
-                    && !saElemType.Contains("float2") && !saElemType.Contains("int2"))
+                    && !SimdVectorTypes.IsFloat2(saElemType) && !SimdVectorTypes.IsInt2(saElemType))
                 {
                     return EmitStructFieldStore(assign, ma, ea2, arrName2, saElemType);
                 }
@@ -319,14 +369,14 @@ namespace NativeTranspiler.Analyzer
 
                 // SIMD context: per-lane field scatter
                 // For varying index, generate per-lane scatter to arr_ptr[v_i_lane].field
-                if (idxExpr3.Contains("v_") || idxExpr3 == "v_i" || _currentMask != "simd_mask::all_true()")
+                if (structLocalAssignInfo.varyingIndex || !_currentMask.IsAllTrue)
                 {
                     string extractFn3 = "n_extract_lane_f32";
                     string combineExpr = op3 == "=" ? rhsExpr3 : $"{idxExpr3} {op3.Replace("=", "")} {rhsExpr3}";
 
-                    if (_currentMask != "simd_mask::all_true()")
+                    if (!_currentMask.IsAllTrue)
                     {
-                        return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{arrName3}_ptr[n_extract_lane_epi32({idxExpr3}.v,__l)].{fieldName3}={extractFn3}({combineExpr}.v,__l);}}}}}}";
+                        return $"{{int __sg=n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{arrName3}_ptr[n_extract_lane_epi32({idxExpr3}.v,__l)].{fieldName3}={extractFn3}({combineExpr}.v,__l);}}}}}}";
                     }
                     return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{arrName3}_ptr[n_extract_lane_epi32({idxExpr3}.v,__l)].{fieldName3}={extractFn3}({combineExpr}.v,__l);}}}}";
                 }
@@ -344,7 +394,7 @@ namespace NativeTranspiler.Analyzer
                 string arrName5 = id5.Identifier.Text;
                 if (_nativeArrayParams.TryGetValue(arrName5, out var saElemType5)
                     && saElemType5 != "float" && saElemType5 != "int"
-                    && !saElemType5.Contains("float2") && !saElemType5.Contains("int2"))
+                    && !SimdVectorTypes.IsFloat2(saElemType5) && !SimdVectorTypes.IsInt2(saElemType5))
                 {
                     string fieldPath = ma6.Name.Identifier.Text + "." + ma5.Name.Identifier.Text + "()";
                     string idxExpr5 = ea5.ArgumentList?.Arguments.Count > 0 ? TranslateExpression(ea5.ArgumentList?.Arguments[0]?.Expression) : "0";
@@ -356,8 +406,8 @@ namespace NativeTranspiler.Analyzer
                     if (idxKind5 >= VarKind.Varying)
                     {
                         // Per-lane scatter for struct sub-field write
-                        if (_currentMask != "simd_mask::all_true()")
-                            return $"{{int __sg=n_mask_to_bitmask(({_currentMask}).m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}}}";
+                        if (!_currentMask.IsAllTrue)
+                            return $"{{int __sg=n_mask_to_bitmask({CppIntegerSemantics.MemberOperand(_currentMask)}.m);for(int __l=0;__l<g_simdWidthInt;__l++){{if(__sg&(1<<__l)){{{id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}}}";
                         return $"{{for(int __l=0;__l<g_simdWidthInt;__l++){{{id5.Identifier.Text}_ptr[n_extract_lane_epi32({idxExpr5}.v,__l)].{fieldPath}=n_extract_lane_f32({rhsExpr5}.v,__l);}}}}";
                     }
                     return $"{id5.Identifier.Text}_ptr[{idxExpr5}].{fieldPath} = {rhsExpr5}";
@@ -383,12 +433,14 @@ namespace NativeTranspiler.Analyzer
                     && svlEA.Expression is IdentifierNameSyntax svlArrId
                     && _nativeArrayParams.TryGetValue(svlArrId.Identifier.Text, out var svlElemType)
                     && svlElemType != "float" && svlElemType != "int"
-                    && !svlElemType.Contains("float2") && !svlElemType.Contains("int2"))
+                    && !SimdVectorTypes.IsFloat2(svlElemType) && !SimdVectorTypes.IsInt2(svlElemType))
                 {
-                    string svlIdxExpr = svlEA.ArgumentList?.Arguments.Count > 0
-                        ? TranslateExpression(svlEA.ArgumentList.Arguments[0].Expression)
-                        : "0";
-                    _structVaryingLocals[svlId.Identifier.Text] = (svlArrId.Identifier.Text, svlElemType, svlIdxExpr);
+                    ExpressionSyntax? svlIdxSyntax = svlEA.ArgumentList?.Arguments.Count > 0
+                        ? svlEA.ArgumentList.Arguments[0].Expression
+                        : null;
+                    string svlIdxExpr = svlIdxSyntax != null ? TranslateExpression(svlIdxSyntax) : "0";
+                    bool svlVaryingIndex = svlIdxSyntax != null && _varAnalyzer.ClassifyExpression(svlIdxSyntax) >= VarKind.Varying;
+                    _structVaryingLocals[svlId.Identifier.Text] = (svlArrId.Identifier.Text, svlElemType, svlIdxExpr, svlVaryingIndex);
                 }
                 else
                 {
@@ -417,7 +469,7 @@ namespace NativeTranspiler.Analyzer
                 && _variables.TryGetValue(lhsId.Identifier.Text, out var vector) && vector.Kind >= VarKind.Varying)
             {
                 string value = op == "=" ? rhs : $"{lhs} {op.Substring(0, op.Length - 1)} ({rhs})";
-                return _currentMask == "simd_mask::all_true()"
+                return _currentMask.IsAllTrue
                     ? $"{lhs} = {value}" : $"{lhs} = blend({lhs}, {value}, {_currentMask})";
             }
 

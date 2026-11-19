@@ -74,9 +74,33 @@ namespace EntJoy.ECS.SourceGenerator
             sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
             sb.AppendLine($"    public ChunkEnumerator<{genList}> GetEnumerator()");
             sb.AppendLine($"        => new ChunkEnumerator<{genList}>(_entityManager, _builder);");
+            sb.AppendLine();
+            sb.AppendLine("    /// <summary>按块推进、逐实体回调：不构造查询结果，循环体在块循环里展开。</summary>");
+            sb.AppendLine($"    public void ForEach<TIter>(ref TIter body) where TIter : struct, IEntityForEach<{genList}>");
+            sb.AppendLine("    {");
+            sb.AppendLine("        foreach (var chunk in this)");
+            sb.AppendLine("        {");
+            for (int i = 0; i < n; i++)
+                sb.AppendLine($"            var c{i} = chunk.GetSpan{i}();");
+            sb.Append("            for (int i = 0; i < c0.Length; i++) body.Execute(");
+            sb.Append(string.Join(", ", genParams.Select((_, i) => $"ref c{i}[i]")));
+            sb.AppendLine(");");
+            sb.AppendLine("        }");
+            sb.AppendLine("    }");
             sb.AppendLine("}");
             sb.AppendLine();
-
+            // 接口与手写的两组件版本同处 EntJoy.ECS，调用方只需要一个命名空间。
+            sb.AppendLine("namespace EntJoy.ECS");
+            sb.AppendLine("{");
+            sb.AppendLine($"    public interface IEntityForEach<{genList}>");
+            sb.AppendLine($"        {whereClause}");
+            sb.AppendLine("    {");
+            sb.Append("        void Execute(");
+            sb.Append(string.Join(", ", genParams.Select((g, i) => $"ref {g} c{i}")));
+            sb.AppendLine(");");
+            sb.AppendLine("    }");
+            sb.AppendLine("}");
+            sb.AppendLine();
             // ChunkEnumerator<T0..Tn>
             sb.AppendLine($"public unsafe ref struct ChunkEnumerator<{genList}>");
             sb.AppendLine($"    {whereClause}");

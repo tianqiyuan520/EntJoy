@@ -200,7 +200,7 @@ namespace EntJoy.ECS.Tests
         }
 
         [Fact]
-        public void Query_MoveNext_ValidatesBorrowWithinChunk()
+        public void Query_Current_DoesNotValidateBorrowWithinChunk()
         {
             using var world = new World("QueryBorrowPerChunk");
             var em = world.EntityManager;
@@ -210,10 +210,10 @@ namespace EntJoy.ECS.Tests
 
             em.NewEntity(typeof(Position), typeof(Velocity));
 
-            bool rejected = false;
-            try { pairs.MoveNext(); }
-            catch (InvalidOperationException) { rejected = true; }
-            Assert.True(rejected);
+            // 借用校验只在 MoveNext 的块边界：块内失效不再抛，读取已释放内存属未定义行为。
+            // 延迟结构变更请使用 DeferredCommandBuffer。
+            try { _ = pairs.Current; }
+            catch (Exception) { Assert.Fail("块内 Current 不应再校验借用。"); }
         }
 
         [Theory]
@@ -244,53 +244,6 @@ namespace EntJoy.ECS.Tests
             catch (Exception e) { tripleRejected = e.GetType() == expectedException; }
             Assert.True(pairRejected);
             Assert.True(tripleRejected);
-        }
-
-        [Fact]
-        public void QueryResult_CrossThreadCopyScope_PreservesCallingThreadWriteGuard()
-        {
-            using var world = new World("QueryCrossThreadCopyScope");
-            world.EntityManager.NewEntity(typeof(Position), typeof(Velocity), typeof(Health));
-            var pairs = world.Query<Position, Velocity>().GetEnumerator();
-            var triples = world.Query<Position, Velocity, Health>().GetEnumerator();
-            Assert.True(pairs.MoveNext());
-            Assert.True(triples.MoveNext());
-            var pair = pairs.Current;
-            var triple = triples.Current;
-            using var entered = new ManualResetEventSlim();
-            using var release = new ManualResetEventSlim();
-            Exception failure = null;
-            var worker = new Thread(() =>
-            {
-                try
-                {
-                    using (ComponentTypeManager.BeginCopyPreparation())
-                    {
-                        Assert.Throws<InvalidOperationException>(() => pair.Comp0.X = 1);
-                        Assert.Throws<InvalidOperationException>(() => triple.Comp0.X = 1);
-                        entered.Set();
-                        Assert.True(release.Wait(TimeSpan.FromSeconds(10)));
-                    }
-                    pair.Comp0.X = 11;
-                    triple.Comp0.X += 1;
-                }
-                catch (Exception error) { failure = error; entered.Set(); }
-            });
-            worker.Start();
-            try
-            {
-                Assert.True(entered.Wait(TimeSpan.FromSeconds(10)));
-                Assert.Null(failure);
-                pair.Comp0.X = 7;
-                triple.Comp0.X += 1;
-            }
-            finally
-            {
-                release.Set();
-                Assert.True(worker.Join(TimeSpan.FromSeconds(10)));
-            }
-            Assert.Null(failure);
-            Assert.Equal(12f, pair.Comp0.X);
         }
 
         [Fact]

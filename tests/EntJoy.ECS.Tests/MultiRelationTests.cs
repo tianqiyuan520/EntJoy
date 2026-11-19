@@ -5,12 +5,11 @@ using Xunit;
 namespace EntJoy.ECS.Tests
 {
     /// <summary>多值关系（出边 1:N / M:N）：技能列表。</summary>
-    [MultiRelation]
+    [RelationshipComponent(Multiple = true)]
     public struct Skill : IRelationComponent { public RelationSlot Target; }
 
     /// <summary>多值关系 + 入边唯一（背包：角色多物品，物品唯一持有者）。</summary>
-    [MultiRelation]
-    [ExclusiveTarget]
+    [RelationshipComponent(Multiple = true, ExclusiveTarget = true)]
     public struct OwnsItem : IRelationComponent { public RelationSlot Target; }
 
     public class MultiRelationTests

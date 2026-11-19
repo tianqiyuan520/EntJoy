@@ -31,8 +31,8 @@ public struct ReadLinkCppSimd : IJobChunk
     }
 }
 
-[NativeTranspile(Target = BackendTarget.Cpp, AutoSIMD = AutoSIMD.Vectorize)]
-public struct ReadLinkCppVectorize : IJobEntity
+[NativeTranspile(Target = BackendTarget.Cpp, AutoSIMD = AutoSIMD.Disabled)]
+public struct ReadLinkCppScalar : IJobEntity
 {
     public void Execute(ReadLink link, ref ReadLinkOutput output)
     {
@@ -144,9 +144,9 @@ public static class RelationshipReadFixture
                     }
                     case 2:
                     {
-                        var job = new ReadLinkCppVectorize();
-                        if (schedule == 0) NativeExports.RunImmediate_ReadLinkCppVectorize(ref job, query, world);
-                        else if (schedule == 1) NativeExports.Schedule_ReadLinkCppVectorize(ref job, query, default, world).Complete();
+                        var job = new ReadLinkCppScalar();
+                        if (schedule == 0) NativeExports.RunImmediate_ReadLinkCppScalar(ref job, query, world);
+                        else if (schedule == 1) NativeExports.Schedule_ReadLinkCppScalar(ref job, query, default, world).Complete();
                         else RunRaw(ref job, schedule, world, query);
                         break;
                     }

@@ -152,10 +152,10 @@ public struct Value { public int Number; }
     }
 
     [Theory]
-    [InlineData("for(int i=0;i<values.Length;i++) { var v=values[i+1]; values[i]=v; }", "ISPC_ChunkCrossIndexAccess")]
-    [InlineData("for(int i=0;i<values.Length;i++) { if(i==3) break; }", "ISPC_ChunkLoopBreak")]
-    [InlineData("int sum=0; for(int i=0;i<values.Length;i++) sum+=values[i].Number;", "ISPC_ChunkOuterLocalWrite")]
-    public void UnprovenChunkParallelismIsExplicitlyRejected(string loop, string marker)
+    [InlineData("for(int i=0;i<values.Length;i++) { var v=values[i+1]; values[i]=v; }")]
+    [InlineData("for(int i=0;i<values.Length;i++) { if(i==3) break; }")]
+    [InlineData("int sum=0; for(int i=0;i<values.Length;i++) sum+=values[i].Number;")]
+    public void UnprovenChunkParallelismFallsBackToSerialLoop(string loop)
     {
         var result = GeneratorHarness.EmitForJob(@"using NativeTranspiler; using EntJoy.ECS;
 public struct Value { public int Number; }
@@ -164,7 +164,10 @@ public struct Value { public int Number; }
   var values=chunk.GetComponentDataNativeArray<Value>(); " + loop + @"
  }
 }");
-        Assert.Contains("__ENTJOY_UNSUPPORTED_STMT__" + marker, result.Cpp);
+        // 无法证明"一 lane 一实体"退化成一 lane 跑完整条循环，语义与托管一致。
+        Assert.DoesNotContain("__ENTJOY_UNSUPPORTED", result.Cpp);
+        Assert.Contains("if (programIndex != 0) return;", result.Cpp);
+        Assert.Contains("for (uniform int i = 0; i < __entity_count; i++)", result.Cpp);
     }
 
     [Fact]

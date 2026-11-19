@@ -184,9 +184,12 @@ namespace NativeTranspiler.Analyzer
             AppendIndent();
             var type = ResolveLocalType(localDecl.Declaration.Type, localDecl.Declaration.Variables);
             if (type == null)
-                throw new InvalidOperationException(
-                    $"无法解析局部声明的类型：{localDecl.Declaration.Type}。"
-                    + "请显式写出类型并避免 `ref` 局部（改用指针局部 T* p = &arr[i]）。");
+            {
+                // 类型解析不出来时不能抛：抛出去只会变成 NT026 生成器崩溃。
+                // 发标记让构建期显式失败，消息里指明改法。
+                _builder.AppendLine($"/*{UnsupportedMarkers.Stmt}LocalTypeUnresolved*/");
+                return;
+            }
             var cppType = NativeTranspiler.MapCSharpTypeToCpp(type);
             // `ref T x = ref expr;` → C++ `T& x = expr;`（通解：引用即引用，无需写回）
             bool byRef = localDecl.Declaration.Type is RefTypeSyntax;
@@ -238,7 +241,11 @@ namespace NativeTranspiler.Analyzer
             {
                 var type = ResolveLocalType(forStmt.Declaration.Type, forStmt.Declaration.Variables);
                 if (type == null)
-                    throw new InvalidOperationException($"无法解析 for 声明中的类型：{forStmt.Declaration.Type}。");
+                {
+                    // 同上：无法解析就发标记，不抛异常。
+                    _builder.AppendLine($"/*{UnsupportedMarkers.Stmt}ForTypeUnresolved*/");
+                    return;
+                }
                 var cppType = NativeTranspiler.MapCSharpTypeToCpp(type);
                 for (int i = 0; i < forStmt.Declaration.Variables.Count; i++)
                 {
@@ -271,7 +278,7 @@ namespace NativeTranspiler.Analyzer
                 for (int i = 0; i < forStmt.Incrementors.Count; i++)
                 {
                     if (i > 0) _builder.Append(", ");
-                    TranslateExpression(forStmt.Incrementors[i]);
+                    TranslateDiscardedValue(forStmt.Incrementors[i]);
                 }
             }
             _builder.AppendLine(")");
@@ -297,9 +304,12 @@ namespace NativeTranspiler.Analyzer
         protected virtual void TranslateExpressionStatement(ExpressionStatementSyntax exprStmt)
         {
             AppendIndent();
-            TranslateExpression(exprStmt.Expression);
+            TranslateDiscardedValue(exprStmt.Expression);
             _builder.AppendLine(";");
         }
+
+        /// <summary>转译一个值被丢弃的表达式（语句体、for 增量）：默认与普通转译相同。</summary>
+        protected virtual void TranslateDiscardedValue(ExpressionSyntax expr) => TranslateExpression(expr);
 
         protected virtual void TranslateReturnStatement(ReturnStatementSyntax returnStmt)
         {
@@ -851,9 +861,15 @@ namespace NativeTranspiler.Analyzer
         {
             var type = _semanticModel.GetTypeInfo(cast.Type).Type;
             var cppType = NativeTranspiler.MapCSharpTypeToCpp(type!);
-            _builder.Append("((").Append(cppType).Append(')');
-            TranslateExpression(cast.Expression);
-            _builder.Append(')');
+            // 源类型与目标类型相同 ⇒ 恒等转换，直接发操作数。
+            if (SymbolEqualityComparer.Default.Equals(type, _semanticModel.GetTypeInfo(cast.Expression).Type))
+            {
+                TranslateExpression(cast.Expression);
+                return;
+            }
+            // C 风格转换的优先级已高于所有二元运算符，只有复合操作数需要括号。
+            string operand = CaptureExpression(cast.Expression);
+            _builder.Append('(').Append(cppType).Append(')').Append(CppIntegerSemantics.CastOperand(operand));
         }
 
         protected virtual void TranslateObjectCreation(ObjectCreationExpressionSyntax objectCreation)
@@ -948,27 +964,27 @@ namespace NativeTranspiler.Analyzer
             string cppFunc = isMathF ? method.Name switch
             {
                 "Abs" => "::fabsf",
-                "Acos" => "::acosf",
-                "Asin" => "::asinf",
-                "Atan" => "::atanf",
-                "Atan2" => "::atan2f",
+                "Acos" => "EJ_ACOSF",
+                "Asin" => "EJ_ASINF",
+                "Atan" => "EJ_ATANF",
+                "Atan2" => "EJ_ATAN2F",
                 "Ceiling" => "::ceilf",
                 "Clamp" => "std::clamp",
-                "Cos" => "::cosf",
-                "Cosh" => "::coshf",
-                "Exp" => "::expf",
+                "Cos" => "EJ_COSF",
+                "Cosh" => "EJ_COSHF",
+                "Exp" => "EJ_EXPF",
                 "Floor" => "::floorf",
-                "Log" => "::logf",
-                "Log10" => "::log10f",
+                "Log" => "EJ_LOGF",
+                "Log10" => "EJ_LOG10F",
                 "Max" => "::fmaxf",
                 "Min" => "::fminf",
-                "Pow" => "::powf",
+                "Pow" => "EJ_POWF",
                 "Round" => "::roundf",
-                "Sin" => "::sinf",
-                "Sinh" => "::sinhf",
+                "Sin" => "EJ_SINF",
+                "Sinh" => "EJ_SINHF",
                 "Sqrt" => "::sqrtf",
-                "Tan" => "::tanf",
-                "Tanh" => "::tanhf",
+                "Tan" => "EJ_TANF",
+                "Tanh" => "EJ_TANHF",
                 "Truncate" => "::truncf",
                 "IsNaN" => "std::isnan",
                 "IsInfinity" => "std::isinf",

@@ -30,7 +30,7 @@ public struct Value : IComponentData { public int Number; }
  }
 }");
             Assert.DoesNotContain(result.Diagnostics, d => d.Severity == DiagnosticSeverity.Error);
-            var cpp = File.ReadAllText(Path.Combine(result.OutputDir, "SharpNative_Job__global_namespace__ChunkMask_Execute_Adapter.cpp"));
+            var cpp = File.ReadAllText(Path.Combine(result.OutputDir, "SharpNative_Job__global_namespace__ChunkMask_Execute.cpp"));
             Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(cpp, "template<bool __ejZeroMask>").Count);
             Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(cpp, "_MaskImpl<true>").Count);
             Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(cpp, "_MaskImpl<false>").Count);
@@ -57,7 +57,7 @@ public struct Value : IComponentData { public int Number; }
   }
  }
 }");
-            var cpp = File.ReadAllText(Path.Combine(result.OutputDir, "SharpNative_Job__global_namespace__ChunkMask_Execute_Adapter.cpp"));
+            var cpp = File.ReadAllText(Path.Combine(result.OutputDir, "SharpNative_Job__global_namespace__ChunkMask_Execute.cpp"));
             Assert.DoesNotContain("template<bool __ejZeroMask>", cpp);
         }
 

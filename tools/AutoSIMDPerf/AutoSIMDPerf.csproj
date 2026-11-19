@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AssemblyName>AutoSIMDPerf</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\samples\EntJoySample\EntJoySample.csproj" />
+    <ProjectReference Include="..\..\src\NativeTranspiler.Tasks\NativeTranspiler.Tasks.csproj" ReferenceOutputAssembly="false" Private="false" BuildReference="false" />
+  </ItemGroup>
+
+  <!-- 工具输出目录不在 EntJoySample 的 OutDir 下：显式拷贝原生产物，缺失时会静默跑托管回退 -->
+  <Target Name="CopyNativeArtifacts" AfterTargets="Build">
+    <ItemGroup>
+      <NativeArtifacts Include="$(MSBuildThisFileDirectory)..\..\bin\Native*.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(NativeArtifacts)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

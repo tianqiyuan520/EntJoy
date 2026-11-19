@@ -52,7 +52,7 @@ namespace EntJoy.ECS
 
             Entity previous = default;
             bool displaced = type.IsExclusiveTarget
-                && FindDisplacedOwner(source, type, slot, out previous);
+                && FindExclusiveOwner(source, type, slot, out previous);
             var notification = CaptureMultiNotification(source, type, ObserverEvents.Added, slot);
             var removed = displaced ? CaptureMultiNotification(previous, type, ObserverEvents.Removed, slot) : default;
 
@@ -60,7 +60,7 @@ namespace EntJoy.ECS
             bool column = type.MultiRelationMaxSlots > 0;
             bool hasColumn = arch.Has(type.Type);
             int empty = column && hasColumn ? FindEmptyColumnSlot(source, type) : 0;
-            nint prepared = column && !hasColumn ? PrepareNewRelationColumn(arch, source, type) : 0;
+            PreparedChunk prepared = column && !hasColumn ? PrepareNewRelationColumn(arch, source, type) : PreparedChunk.None;
 
             HashSet<Entity> reverse = PrepareMultiRelationStorage(source, target, type, column,
                 out RelationListStore.RelationTargets list);
@@ -75,23 +75,6 @@ namespace EntJoy.ECS
             CommitRelationNotification(notification);
         }
 
-        // 入边唯一约束：找出当前持有该 target 的其他 source；出现多个说明索引已损坏。
-        private bool FindDisplacedOwner(Entity source, ComponentType type, RelationSlot slot, out Entity previous)
-        {
-            previous = default;
-            var owners = _relationIndex.GetSourcesOfType(slot.ToEntity(), type.Id);
-            if (owners == null) return false;
-            bool displaced = false;
-            foreach (var owner in owners)
-            {
-                if (owner.Equals(source) || !HasMultiEdge(owner, type, slot)) continue;
-                if (displaced) throw new InvalidOperationException("Exclusive target has multiple owners.");
-                previous = owner;
-                displaced = true;
-            }
-            return displaced;
-        }
-
         // 定长多槽列里第一个空槽；列满时直接失败，不做静默覆盖。
         private int FindEmptyColumnSlot(Entity source, ComponentType type)
         {
@@ -99,14 +82,14 @@ namespace EntJoy.ECS
             int empty = 0;
             while (empty < type.MultiRelationMaxSlots && values[empty].IsValid) empty++;
             if (empty == type.MultiRelationMaxSlots)
-                throw new InvalidOperationException($"Multi-relation '{type.Type}' source=({source.Id}, v{source.Version}) is full (MaxSlots={type.MultiRelationMaxSlots}).");
+                throw new InvalidOperationException($"Multi-relation '{type.Type}' source=({source.Id}, v{source.Version}) is full (MaxTargets={type.MultiRelationMaxSlots}).");
             return empty;
         }
 
         // source 首次获得定长多槽列：预留槽位并让原型准备好本轮移除。
-        private nint PrepareNewRelationColumn(Archetype arch, Entity source, ComponentType type)
+        private PreparedChunk PrepareNewRelationColumn(Archetype arch, Entity source, ComponentType type)
         {
-            nint prepared = PrepareRelationSlot(GetComponentDestination(arch, type, true), source);
+            PreparedChunk prepared = PrepareRelationSlot(GetComponentDestination(arch, type, true), source);
             arch.PrepareEntityRemoval();
             return prepared;
         }
@@ -133,7 +116,7 @@ namespace EntJoy.ECS
 
         // 三条写入路径：托管列表追加、定长列的空槽、首次建列（整列初始化为空再写首槽）。
         private void WriteMultiEdge(Entity source, ComponentType type, RelationSlot slot,
-            bool column, bool hasColumn, int empty, nint prepared, RelationListStore.RelationTargets list)
+            bool column, bool hasColumn, int empty, PreparedChunk prepared, RelationListStore.RelationTargets list)
         {
             if (!column) { list.Add(slot); return; }
             if (hasColumn) { ((RelationSlot*)GetRelationValue(source, type))[empty] = slot; return; }

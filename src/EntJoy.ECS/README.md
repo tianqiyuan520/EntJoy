@@ -21,7 +21,7 @@ dotnet add package EntJoy.ECS
 
 ## 关系
 
-普通关系为 N:1，反查可表达背包的 1:N；ExclusiveRelation 约束为 1:1。MultiRelation 提供列表与定长 M:N，支持正反查询、ECB、组复制、Prefab 和快照。Job 可使用只读关系列、精确目标筛选或调用方拥有的目标副本；独立边数据用普通边实体承载。
+关系通过 IRelationComponent 和统一的 RelationshipComponent 特性声明。默认单目标；Hierarchy 开启单父级与防环，Multiple 开启多目标列表，MaxTargets 指定 Job 可读的固定容量，ExclusiveTarget 保证目标持有者唯一，DeleteWithTarget 开启随目标删除。支持正反查询、ECB、组复制、Prefab 和快照。Job 可使用只读关系列、精确目标筛选或调用方拥有的目标副本；独立边数据用普通边实体承载。
 
 建模、完整使用代码和可运行场景见 [Relationship 样例](../../samples/EntJoySample/17_Relationship/README.md)。
 

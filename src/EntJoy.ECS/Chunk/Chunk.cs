@@ -101,7 +101,7 @@ namespace EntJoy.ECS
                 {
                     int size = Meta.ComponentSizes[i];
                     byte* column = (byte*)MemoryBlock + Meta.ComponentOffsets[i] + slot * size;
-                    if (reused) Unsafe.InitBlock(column, 0, (uint)size);
+                    if (reused) BufferCopy.Zero(column, size);
                     if (relations) InitializeRelationSlots(i, column);
                 }
             }
@@ -176,7 +176,7 @@ namespace EntJoy.ECS
                 int size = Meta.ComponentSizes[i];
                 byte* src = (byte*)MemoryBlock + Meta.ComponentOffsets[i] + from * size;
                 byte* dst = (byte*)MemoryBlock + Meta.ComponentOffsets[i] + to * size;
-                Unsafe.CopyBlock(dst, src, (uint)size);
+                BufferCopy.Copy(dst, src, size);
             }
 
             if (!Meta.HasEnableables) return;
@@ -202,7 +202,7 @@ namespace EntJoy.ECS
         public ref T GetComponent<T>(int entityIndex, int componentIndex) where T : struct
         {
             ref var value = ref GetComponentStorage<T>(entityIndex, componentIndex);
-            if (Meta.Archetype.Types[componentIndex].IsRelation)
+            if (Meta.RelationColumns[componentIndex])
                 throw new InvalidOperationException(
                     "Relationship columns require GetComponentReadOnly; change values through EntityManager or DeferredCommandBuffer.");
             return ref value;
@@ -210,6 +210,17 @@ namespace EntJoy.ECS
 
         public ref readonly T GetComponentReadOnly<T>(int entityIndex, int componentIndex) where T : struct
             => ref GetComponentStorage<T>(entityIndex, componentIndex);
+
+        /// <summary>调用方已校验实体句柄与列下标时使用：省掉处置与两处越界复查，仍拒绝写关系列。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal ref T GetComponentUnchecked<T>(int entityIndex, int componentIndex) where T : struct
+        {
+            if (Meta.RelationColumns[componentIndex])
+                throw new InvalidOperationException(
+                    "Relationship columns require GetComponentReadOnly; change values through EntityManager or DeferredCommandBuffer.");
+            return ref Unsafe.AsRef<T>(
+                (byte*)MemoryBlock + Meta.ComponentOffsets[componentIndex] + entityIndex * Meta.ComponentSizes[componentIndex]);
+        }
 
         internal ref T GetComponentStorage<T>(int entityIndex, int componentIndex) where T : struct
         {

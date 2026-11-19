@@ -91,6 +91,12 @@ namespace EntJoy.ECS
         public void DestroyEntity(Entity entity)
         {
             CheckDisposed();
+            // 延迟作用域内改结构：进队列，作用域结束时统一回放。
+            if (_deferring != null)
+            {
+                _deferring.DestroyEntity(entity);
+                return;
+            }
             bool idle = JobBookkeepingIdle();
             if (idle && _relationIndex.IsEmpty)
             {
@@ -154,7 +160,7 @@ namespace EntJoy.ECS
             var type = ComponentTypeManager.GetTypeByComponentType(relTypeId);
             var compType = ComponentTypeManager.GetComponentType(type);
 
-            // 定长多槽列（[MultiRelation(MaxSlots=N)]）：逐槽校验
+            // 定长多槽列（[RelationshipComponent(MaxTargets=N)]）：逐槽校验
             if (compType.MultiRelationMaxSlots >= 2)
             {
                 if (!info.Archetype.Has(type)) return false;
@@ -170,7 +176,7 @@ namespace EntJoy.ECS
                 return false;
             }
 
-            // 托管列表模式（[MultiRelation] 无 MaxSlots）：查正向列表
+            // 托管列表模式（[RelationshipComponent(Multiple = true)] 无固定容量）：查正向列表
             if (compType.IsMultiRelation)
                 return _relationListStore.Has(relTypeId, source, RelationSlot.From(target));
 

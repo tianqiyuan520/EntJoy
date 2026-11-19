@@ -98,7 +98,7 @@ struct simd_value<float> {
     simd_value round() const { return simd_value{ n_round_ps(v) }; }
     simd_value trunc() const { return simd_value{ n_trunc_ps(v) }; }
 
-    // Full-Width SIMD: transcendental functions via SLEEF
+    // 整宽向量超越函数：直调 NativeSIMD_math.h 的 n_*_ps（定义域与精度档在那一层统一）
     simd_value sin()    const { return simd_value{ n_sin_ps(v) }; }
     simd_value cos()    const { return simd_value{ n_cos_ps(v) }; }
     simd_value tan()    const { return simd_value{ n_tan_ps(v) }; }
@@ -356,6 +356,66 @@ struct simd_value<int> {
 // ============================================================
 
 /// <summary>
+/// Narrow-integer truncation in the vector domain: 对应 C# 的 (byte)/(sbyte)/(ushort)/(short)。
+/// 值仍以 int32 lane 承载，截断 + 符号扩展在这里做，避免把 simd 值 C 风格转型成标量。
+/// </summary>
+static inline simd_value<int> simd_trunc_u8(simd_value<int> v) {
+#if defined(NSIMD_AVX512)
+    return simd_value<int>{ _mm512_and_si512(v.v, _mm512_set1_epi32(0xFF)) };
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return simd_value<int>{ _mm256_and_si256(v.v, _mm256_set1_epi32(0xFF)) };
+#elif defined(NSIMD_SSE4)
+    return simd_value<int>{ _mm_and_si128(v.v, _mm_set1_epi32(0xFF)) };
+#else
+    int tmp[NSIMD_WIDTH]; v.store(tmp);
+    for (int i = 0; i < NSIMD_WIDTH; i++) tmp[i] = (unsigned char)tmp[i];
+    return simd_value<int>::load(tmp);
+#endif
+}
+
+static inline simd_value<int> simd_trunc_s8(simd_value<int> v) {
+#if defined(NSIMD_AVX512)
+    return simd_value<int>{ _mm512_srai_epi32(_mm512_slli_epi32(v.v, 24), 24) };
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return simd_value<int>{ _mm256_srai_epi32(_mm256_slli_epi32(v.v, 24), 24) };
+#elif defined(NSIMD_SSE4)
+    return simd_value<int>{ _mm_srai_epi32(_mm_slli_epi32(v.v, 24), 24) };
+#else
+    int tmp[NSIMD_WIDTH]; v.store(tmp);
+    for (int i = 0; i < NSIMD_WIDTH; i++) tmp[i] = (signed char)tmp[i];
+    return simd_value<int>::load(tmp);
+#endif
+}
+
+static inline simd_value<int> simd_trunc_u16(simd_value<int> v) {
+#if defined(NSIMD_AVX512)
+    return simd_value<int>{ _mm512_and_si512(v.v, _mm512_set1_epi32(0xFFFF)) };
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return simd_value<int>{ _mm256_and_si256(v.v, _mm256_set1_epi32(0xFFFF)) };
+#elif defined(NSIMD_SSE4)
+    return simd_value<int>{ _mm_and_si128(v.v, _mm_set1_epi32(0xFFFF)) };
+#else
+    int tmp[NSIMD_WIDTH]; v.store(tmp);
+    for (int i = 0; i < NSIMD_WIDTH; i++) tmp[i] = (unsigned short)tmp[i];
+    return simd_value<int>::load(tmp);
+#endif
+}
+
+static inline simd_value<int> simd_trunc_s16(simd_value<int> v) {
+#if defined(NSIMD_AVX512)
+    return simd_value<int>{ _mm512_srai_epi32(_mm512_slli_epi32(v.v, 16), 16) };
+#elif defined(NSIMD_AVX2) || defined(NSIMD_AVX)
+    return simd_value<int>{ _mm256_srai_epi32(_mm256_slli_epi32(v.v, 16), 16) };
+#elif defined(NSIMD_SSE4)
+    return simd_value<int>{ _mm_srai_epi32(_mm_slli_epi32(v.v, 16), 16) };
+#else
+    int tmp[NSIMD_WIDTH]; v.store(tmp);
+    for (int i = 0; i < NSIMD_WIDTH; i++) tmp[i] = (short)tmp[i];
+    return simd_value<int>::load(tmp);
+#endif
+}
+
+/// <summary>
 /// SIMD unsigned integer modulo with constant divisor.
 /// For power-of-2 divisors, uses bit mask. Otherwise uses unsigned modulo.
 /// </summary>
@@ -522,6 +582,8 @@ struct simd_value<EntJoy::Mathematics::int2> {
     friend simd_value operator+(simd_value a, int b) { return simd_value{ a.x + b, a.y + b }; }
     friend simd_value operator-(simd_value a, int b) { return simd_value{ a.x - b, a.y - b }; }
     friend simd_value operator*(simd_value a, int b) { return simd_value{ a.x * b, a.y * b }; }
+    friend simd_value operator*(simd_value a, unsigned int b) { return simd_value{ a.x * (int)b, a.y * (int)b }; }
+    friend simd_value operator*(unsigned int b, simd_value a) { return a * b; }
     friend simd_value operator/(simd_value a, int b) { return simd_value{ a.x / b, a.y / b }; }
     friend simd_value operator+(int a, simd_value b) { return simd_value{ a + b.x, a + b.y }; }
     friend simd_value operator-(int a, simd_value b) { return simd_value{ a - b.x, a - b.y }; }
@@ -597,6 +659,70 @@ static inline simd_value<EntJoy::Mathematics::int2> blend(
     simd_value<EntJoy::Mathematics::int2> f, simd_value<EntJoy::Mathematics::int2> t, simd_mask m) {
     return simd_value<EntJoy::Mathematics::int2>{ blend(f.x, t.x, m), blend(f.y, t.y, m) };
 }
+
+// ============================================================
+// 无符号整数运算（C# 的 uint / uint2 语义）
+//   C++ 的 int 运算是有符号的：/ % >> 都按补码符号解释，直接沿用会静默错值。
+//   这里按"操作数是否无符号"提供同一组 helper 的重载：标量、simd_value<int>、
+//   以及 2 分量 pair（simd_value<int2> / int2），翻译器只按符号性选函数名。
+// ============================================================
+static inline simd_value<int> simd_div_u32(simd_value<int> a, simd_value<int> b) {
+    int la[NSIMD_WIDTH], lb[NSIMD_WIDTH], lr[NSIMD_WIDTH];
+    a.store(la); b.store(lb);
+    // 必须禁向量化：clang 会把标量无符号除法模拟成超长序列，宽向量下编译爆炸。
+    #pragma clang loop vectorize(disable)
+    for (int i = 0; i < NSIMD_WIDTH; i++) lr[i] = (int)((unsigned int)la[i] / (unsigned int)lb[i]);
+    return simd_value<int>::load(lr);
+}
+static inline simd_value<int> simd_div_u32(simd_value<int> a, unsigned int b) {
+    return simd_div_u32(a, simd_value<int>((int)b));
+}
+static inline simd_value<int> simd_mod_u32(simd_value<int> a, simd_value<int> b) {
+    int la[NSIMD_WIDTH], lb[NSIMD_WIDTH], lr[NSIMD_WIDTH];
+    a.store(la); b.store(lb);
+    #pragma clang loop vectorize(disable)
+    for (int i = 0; i < NSIMD_WIDTH; i++) lr[i] = (int)((unsigned int)la[i] % (unsigned int)lb[i]);
+    return simd_value<int>::load(lr);
+}
+static inline simd_value<int> simd_shr_u32(simd_value<int> a, int shift) {
+    return simd_value<int>{ n_srli_epi32(a.v, shift & 31) };
+}
+static inline simd_value<EntJoy::Mathematics::int2> simd_div_u32(
+    simd_value<EntJoy::Mathematics::int2> a, simd_value<EntJoy::Mathematics::int2> b) {
+    return simd_value<EntJoy::Mathematics::int2>{ simd_div_u32(a.x, b.x), simd_div_u32(a.y, b.y) };
+}
+static inline simd_value<EntJoy::Mathematics::int2> simd_div_u32(
+    simd_value<EntJoy::Mathematics::int2> a, unsigned int b) {
+    return simd_value<EntJoy::Mathematics::int2>{ simd_div_u32(a.x, b), simd_div_u32(a.y, b) };
+}
+static inline simd_value<EntJoy::Mathematics::int2> simd_mod_u32(
+    simd_value<EntJoy::Mathematics::int2> a, simd_value<EntJoy::Mathematics::int2> b) {
+    return simd_value<EntJoy::Mathematics::int2>{ simd_mod_u32(a.x, b.x), simd_mod_u32(a.y, b.y) };
+}
+static inline simd_value<EntJoy::Mathematics::int2> simd_mod_u32(
+    simd_value<EntJoy::Mathematics::int2> a, unsigned int b) {
+    return simd_value<EntJoy::Mathematics::int2>{ simd_mod_u32(a.x, b), simd_mod_u32(a.y, b) };
+}
+static inline simd_value<EntJoy::Mathematics::int2> simd_shr_u32(
+    simd_value<EntJoy::Mathematics::int2> a, int shift) {
+    return simd_value<EntJoy::Mathematics::int2>{ simd_shr_u32(a.x, shift), simd_shr_u32(a.y, shift) };
+}
+static inline EntJoy::Mathematics::int2 simd_div_u32(EntJoy::Mathematics::int2 a, EntJoy::Mathematics::int2 b) {
+    return EntJoy::Mathematics::int2(
+        (int)((unsigned int)a.x() / (unsigned int)b.x()),
+        (int)((unsigned int)a.y() / (unsigned int)b.y()));
+}
+static inline EntJoy::Mathematics::int2 simd_mod_u32(EntJoy::Mathematics::int2 a, EntJoy::Mathematics::int2 b) {
+    return EntJoy::Mathematics::int2(
+        (int)((unsigned int)a.x() % (unsigned int)b.x()),
+        (int)((unsigned int)a.y() % (unsigned int)b.y()));
+}
+static inline EntJoy::Mathematics::int2 simd_shr_u32(EntJoy::Mathematics::int2 a, int shift) {
+    return EntJoy::Mathematics::int2(
+        (int)((unsigned int)a.x() >> (shift & 31)),
+        (int)((unsigned int)a.y() >> (shift & 31)));
+}
+
 static inline float hmin(simd_value<float> v) { return n_hmin_ps(v.v); }
 static inline float hmax(simd_value<float> v) { return n_hmax_ps(v.v); }
 static inline float hsum(simd_value<float> v) { return n_hsum_ps(v.v); }
@@ -604,7 +730,7 @@ static inline int hmin(simd_value<int> v) { return n_hmin_epi32(v.v); }
 static inline int hmax(simd_value<int> v) { return n_hmax_epi32(v.v); }
 static inline int hmin_idx(simd_value<float> val, simd_value<int> idx) { return n_hmin_idx(val.v, idx.v); }
 
-// Vector math via SLEEF (ADL targets for auto-SIMD generated code)
+// 向量数学入口（ADL 目标，供 AutoSIMD 生成的代码按名调用）
 // sin/cos/log/exp/... dispatch to n_sin_ps from NativeSIMD_math.h
 #include <cmath>
 static inline simd_value<float> sin(simd_value<float> v)   { return simd_value<float>{ n_sin_ps(v.v) }; }
@@ -620,6 +746,8 @@ static inline simd_value<float> exp(simd_value<float> v)   { return simd_value<f
 static inline simd_value<float> log(simd_value<float> v)   { return simd_value<float>{ n_log_ps(v.v) }; }
 static inline simd_value<float> log10(simd_value<float> v) { return simd_value<float>{ n_log10_ps(v.v) }; }
 
-// SIMD int element-wise min/max (named to avoid Windows min/max macro conflict)
+// SIMD element-wise min/max (named to avoid Windows min/max macro conflict)
 static inline simd_value<int> simd_max(simd_value<int> a, simd_value<int> b) { return simd_value<int>{ n_max_epi32(a.v, b.v) }; }
 static inline simd_value<int> simd_min(simd_value<int> a, simd_value<int> b) { return simd_value<int>{ n_min_epi32(a.v, b.v) }; }
+static inline simd_value<float> simd_max(simd_value<float> a, simd_value<float> b) { return simd_value<float>{ n_max_ps(a.v, b.v) }; }
+static inline simd_value<float> simd_min(simd_value<float> a, simd_value<float> b) { return simd_value<float>{ n_min_ps(a.v, b.v) }; }

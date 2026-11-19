@@ -5,12 +5,11 @@ using Xunit;
 namespace EntJoy.ECS.Tests
 {
     /// <summary>声明级联关系：target 销毁时自动级联销毁指向它的 sources（Flecs OnDeleteTarget）。</summary>
-    [OnTargetDeleted(Cascade = true)]
+    [RelationshipComponent(DeleteWithTarget = true)]
     public struct CascadeChildOf : IRelationComponent { public RelationSlot Target; }
 
     /// <summary>声明级联的多值关系。</summary>
-    [MultiRelation]
-    [OnTargetDeleted(Cascade = true)]
+    [RelationshipComponent(Multiple = true, DeleteWithTarget = true)]
     public struct CascadeDependsOn : IRelationComponent { public RelationSlot Target; }
 
     /// <summary>未声明级联的关系（对照：默认不级联）。</summary>
@@ -23,9 +22,9 @@ namespace EntJoy.ECS.Tests
         [Fact]
         public void ComponentType_Flagged_Cascade()
         {
-            Assert.True(ComponentTypeManager.GetComponentType(typeof(CascadeChildOf)).CascadeOnTargetDeleted);
-            Assert.False(ComponentTypeManager.GetComponentType(typeof(NonCascadeRef)).CascadeOnTargetDeleted);
-            Assert.False(ComponentTypeManager.GetComponentType(typeof(ChildOf)).CascadeOnTargetDeleted);
+            Assert.True(ComponentTypeManager.GetComponentType(typeof(CascadeChildOf)).DeleteWithTarget);
+            Assert.False(ComponentTypeManager.GetComponentType(typeof(NonCascadeRef)).DeleteWithTarget);
+            Assert.False(ComponentTypeManager.GetComponentType(typeof(ChildOf)).DeleteWithTarget);
         }
 
         [Fact]

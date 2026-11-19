@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -18,7 +19,7 @@ namespace NativeTranspiler.Tests
     /// 因此本文件拆成：
     ///   · 默认（未声明"已量过"）⇒ NT024 error + job 被排除（红/绿都断言）；
     ///   · 声明后 ⇒ 无 NT024、正常出绑定；
-    ///   · warning-only 的回归守卫改用仍然是 warning 的 NT023（MathPrecision = High）。
+    ///   · warning-only 的回归守卫改用仍然是 warning 的 NT032（`EntJoyJobIntent=warn` 下清点托管 job）。
     ///   · B3 ①：body 含不可向量化构造 ⇒ NT031 error（原先静默退回 per-lane 标量）。
     /// </summary>
     public class NT05_WarningOnlyJobTests
@@ -75,7 +76,7 @@ public struct WarnOnlyJob : IJobParallelFor
             Assert.Contains("SharpNative_Job__global_namespace__WarnOnlyJob_Execute_Batch", result.Cpp);
         }
 
-        /// <summary>NT-05 原守卫（改用仍是 warning 的 NT023）：warning 不阻断生成、不排除 job。</summary>
+        /// <summary>NT-05 原守卫（改用仍是 warning 的 NT032）：warning 不阻断生成、不排除 job。</summary>
         [Fact]
         public void WarningOnlyJob_StillGetsScheduleBinding()
         {
@@ -94,13 +95,22 @@ public struct HighPrecisionJob : IJobParallelFor
         Out[index] = Value;
     }
 }
-");
+
+// 没有 [NativeTranspile] 的 job ⇒ EntJoyJobIntent=warn 时记一条 NT032，但不影响本批生成。
+public struct ManagedOnlyJob : IJobParallelFor
+{
+    public NativeArray<float> Out;
+    public void Execute(int index) { }
+}
+", extraProperties: new Dictionary<string, string> { ["build_property.EntJoyJobIntent"] = "warn" });
             _out.WriteLine(result.DiagnosticSummary);
 
-            // 前提：这条 job 只触发 warning（NT023 = High 没有 SIMD 实现，产物等同 IEEE）。
-            Assert.True(result.HasDiagnostic("NT023"),
-                GeneratorHarness.Fail(result, "预期 NT023（warning）出现"));
-            Assert.All(result.Of("NT023"), d => Assert.Equal(Microsoft.CodeAnalysis.DiagnosticSeverity.Warning, d.Severity));
+            // 前提：这条编译单元只触发 warning（NT032 = 托管 job 清点），且 High 档不再被误报为“没有实现”。
+            Assert.True(result.HasDiagnostic("NT032"),
+                GeneratorHarness.Fail(result, "预期 NT032（warning）出现"));
+            Assert.All(result.Of("NT032"), d => Assert.Equal(Microsoft.CodeAnalysis.DiagnosticSeverity.Warning, d.Severity));
+            Assert.False(result.HasDiagnostic("NT023"),
+                GeneratorHarness.Fail(result, "MathPrecision = High 已有实现，不应再报 NT023"));
 
             // 缺陷点（历史）：warning 被当成"校验失败" ⇒ NT028（已从本批绑定中排除）+ 没有 Schedule 绑定。
             Assert.False(result.HasDiagnostic("NT028"),
@@ -173,23 +183,24 @@ public struct PlainJob : IJobParallelFor
         [Fact]
         public void ErrorJob_IsStillExcludedFromBindings()
         {
-            // 反向守卫：真正的 error（这里用 Vectorize + 非 chunk/entity job ⇒ NT018）仍必须
+            // 反向守卫：真正的 error（这里用 AutoSIMD.Enabled + 不可向量化构造 ⇒ NT031）仍必须
             // 把该 job 排除出绑定集，并报 NT028 —— 修 warning 门控不得顺手放过 error。
             var result = GeneratorHarness.EmitFor(@"
+using System.Threading;
 using NativeTranspiler;
 using EntJoy.JobSystem;
 using EntJoy.Collections;
 
-[NativeTranspile(AutoSIMD = AutoSIMD.Vectorize)]
-public struct VectorizeOnParallelForJob : IJobParallelFor
+[NativeTranspile(AutoSIMD = AutoSIMD.Enabled)]
+public struct AtomicVectorizeJob : IJobParallelFor
 {
     public NativeArray<float> Out;
-    public void Execute(int index) { Out[index] = 1.0f; }
+    public void Execute(int index) { Interlocked.Increment(ref Out[index]); }
 }
 ");
             _out.WriteLine(result.DiagnosticSummary);
-            Assert.True(result.HasDiagnostic("NT018"), GeneratorHarness.Fail(result, "预期 NT018（error）出现"));
-            Assert.DoesNotContain("Schedule_VectorizeOnParallelForJob", result.Bindings);
+            Assert.True(result.HasDiagnostic("NT031"), GeneratorHarness.Fail(result, "预期 NT031（error）出现"));
+            Assert.DoesNotContain("Schedule_AtomicVectorizeJob", result.Bindings);
         }
     }
 

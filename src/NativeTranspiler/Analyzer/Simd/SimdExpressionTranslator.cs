@@ -50,7 +50,7 @@ namespace NativeTranspiler.Analyzer
                     {
                         if (_varAnalyzer.ClassifyExpression(prefix) < VarKind.Varying)
                             return $"(!({TranslateExpression(prefix.Operand)}))";
-                        return $"simd_mask{{ n_not_mask(({TranslateCondition(prefix.Operand)}).m) }}";
+                        return $"simd_mask{{ n_not_mask({CppIntegerSemantics.MemberOperand(TranslateCondition(prefix.Operand))}.m) }}";
                     }
                     if (prefix.IsKind(SyntaxKind.BitwiseNotExpression))
                     {
@@ -107,7 +107,7 @@ namespace NativeTranspiler.Analyzer
                 if ((SymbolHelper.GetBoundSymbol(_semanticModel, id) is IFieldSymbol
                     || id.SyntaxTree != _semanticModel.SyntaxTree && !_variables.ContainsKey(name))
                     && _boolFields.TryGetValue(name, out var bv))
-                    return bv == "true" ? "simd_mask::all_true()" : "simd_mask{ n_cmp_ne_epi32(n_set1_epi32(0), n_set1_epi32(0)) }";
+                    return bv == "true" ? SimdMask.AllTrue : "simd_mask{ n_cmp_ne_epi32(n_set1_epi32(0), n_set1_epi32(0)) }";
                 // Uniform bool: broadcast to all lanes then compare !=0 to produce proper n_mask
                 bool isLocalValue = SymbolHelper.GetBoundSymbol(_semanticModel, id) is not IFieldSymbol;
                 if (isLocalValue && _variables.TryGetValue(name, out var info) && info.Kind == VarKind.Uniform)
@@ -120,7 +120,7 @@ namespace NativeTranspiler.Analyzer
             string result = TranslateExpression(expr);
             if (_varAnalyzer.ClassifyExpression(expr) < VarKind.Varying)
                 return $"simd_mask{{ n_cmp_ne_epi32(simd_value<int>::broadcast({result} ? -1 : 0).v, n_set1_epi32(0)) }}";
-            return ProducesMask(expr) ? result : $"simd_mask{{ n_cmp_ne_epi32(({result}).v, n_set1_epi32(0)) }}";
+            return ProducesMask(expr) ? result : $"simd_mask{{ n_cmp_ne_epi32({CppIntegerSemantics.MemberOperand(result)}.v, n_set1_epi32(0)) }}";
         }
 
         private static bool ProducesMask(ExpressionSyntax expression)
@@ -250,7 +250,7 @@ namespace NativeTranspiler.Analyzer
                 string arrName = arrId.Identifier.Text;
                 if (_nativeArrayParams.TryGetValue(arrName, out var structElemType)
                     && structElemType != "float" && structElemType != "int"
-                    && !structElemType.Contains("float2") && !structElemType.Contains("int2"))
+                    && !SimdVectorTypes.IsFloat2(structElemType) && !SimdVectorTypes.IsInt2(structElemType))
                 {
                     return TranslateStructArrayFieldAccess(arrName, structElemType, memberName,
                         ea.ArgumentList?.Arguments.Count > 0 ? ea.ArgumentList.Arguments[0].Expression : null,
@@ -265,7 +265,8 @@ namespace NativeTranspiler.Analyzer
                 && _structVaryingLocals.TryGetValue(structLocalId.Identifier.Text, out var structLocalInfo))
             {
                 return TranslateStructFieldAccess(structLocalInfo.arrName, structLocalInfo.elemCppType,
-                    memberName, structLocalInfo.indexExpr, StructFieldType(memberAccess, structLocalInfo.elemCppType, memberName), StructFieldStride(memberAccess));
+                    memberName, structLocalInfo.indexExpr, StructFieldType(memberAccess, structLocalInfo.elemCppType, memberName),
+                    StructFieldStride(memberAccess), structLocalInfo.varyingIndex);
             }
 
             string objExpr = TranslateExpression(memberAccess.Expression);
@@ -275,35 +276,23 @@ namespace NativeTranspiler.Analyzer
             bool isVaryingFloat2 = objName != null && _float2VaryingVars.Contains(objName);
 
             // 标量位置的字段读取：接收者不是向量 → 绝不做 `.v` 包装。
-            //   （`CpuUnitConfigData cfg = cfgPtr[cfgIdPtr[index]]; cfg.FramesDeath` 的接收者翻译出来是
-            //    `simd_value<int>{ n_load_epi32(cfgIdPtr + si) }` 这种标量 SIMD 包装，本身无 `.v`。）
             //   2 分量向量（变量名或 `simd_value<int2>::gather(...)` 这类表达式）的分量是字段不是方法，
-            //   所以它既不能走标量回退，也不能被 `!objExpr.Contains(".v")` 判成标量。
-            bool twoComponentVectorExpr = objExpr.Contains("simd_value<EntJoy::Mathematics::float2")
-                || objExpr.Contains("simd_value<EntJoy::Mathematics::int2")
-                || objExpr.Contains("simd_value<EntJoy::Mathematics::uint2");
-            bool scalarReceiver = !objExpr.Contains(".v") && !isVaryingFloat2 && !twoComponentVectorExpr;
+            //   所以它既不能走标量回退，也不能被判成标量。
+            var receiverTraits = SimdExprShapes.Of(objExpr);
+            bool scalarReceiver = !receiverTraits.HasFlag(SimdExprTraits.LaneAccess)
+                && !receiverTraits.HasFlag(SimdExprTraits.TwoComponentWrapper)
+                && !isVaryingFloat2;
 
             // .MaxValue / .MinValue — 必须早于 scalarReceiver 的标量回退分支：
             // 接收者是预定义类型（`float.MaxValue` / `int.MaxValue`）时，TranslateExpression(接收者)
             // 本分支不需要 objExpr（类型信息从接收者文本/语义模型取），因此放在最前面即可。
             if (memberName == "MaxValue" || memberName == "MinValue")
             {
-                bool isInt = true;
-                string recv = memberAccess.Expression.ToString();
-                if (recv.Contains("float") || recv.Contains("double") || recv.Contains("Single") || recv.Contains("Double"))
-                    isInt = false;
-                // SemanticModel fallback: resolve the receiver's type when it's not a literal keyword
-                if (recv != "int" && recv != "float" && recv != "double" && recv != "long")
-                {
-                    try
-                    {
-                        var t = SymbolHelper.GetBoundType(_semanticModel, memberAccess.Expression);
-                        if (t != null && (t.SpecialType == SpecialType.System_Single || t.SpecialType == SpecialType.System_Double))
-                            isInt = false;
-                    }
-                    catch { }
-                }
+                // 接收者类型由语义模型给出：float/double 走浮点极值，其余整型走 std::numeric_limits<int>。
+                var receiverType = SymbolHelper.GetBoundType(_semanticModel, memberAccess.Expression);
+                bool isInt = receiverType == null
+                    || (receiverType.SpecialType != SpecialType.System_Single
+                        && receiverType.SpecialType != SpecialType.System_Double);
                 if (isInt)
                 {
                     string sign = memberName == "MaxValue" ? "max" : "min";
@@ -317,12 +306,13 @@ namespace NativeTranspiler.Analyzer
             // 必须早于 scalarReceiver 回退，否则会被原样输出成 `int2.zero`。
             if (memberName == "zero")
             {
-                if (objExpr.Contains("uint2"))
-                    return "EntJoy::Mathematics::uint2(0u, 0u)";
-                if (objExpr.Contains("int2"))
-                    return "EntJoy::Mathematics::int2(0, 0)";
-                if (objExpr.Contains("float2"))
-                    return "EntJoy::Mathematics::float2(0.0f, 0.0f)";
+                // 接收者是类型名；按绑定符号判定，符号不可得时退到归一化后的叶子名（裸名 / 点号限定名 / 包装）。
+                var zeroSymbol = SymbolHelper.GetBoundType(_semanticModel, memberAccess.Expression);
+                string zeroCppType = zeroSymbol != null ? NativeTranspiler.MapCSharpTypeToCpp(zeroSymbol) : "";
+                string zeroLeaf = SimdVectorTypes.LeafName(zeroCppType.Length > 0 ? zeroCppType : objExpr.Replace('.', ':'));
+                if (zeroLeaf == "uint2") return "EntJoy::Mathematics::uint2(0u, 0u)";
+                if (zeroLeaf == "int2") return "EntJoy::Mathematics::int2(0, 0)";
+                if (zeroLeaf == "float2") return "EntJoy::Mathematics::float2(0.0f, 0.0f)";
             }
 
             // .x / .y 的向量成员形式只有真向量才成立；标量接收者走值类型路径（`p.x()`）。
@@ -373,7 +363,7 @@ namespace NativeTranspiler.Analyzer
             // Struct field gather result: n_gather_ps already returns the component value.
             //   For .x on a float2 field gather, just return the gather (it's already x).
             //   For .y, we need the gather at offset+1 (y is at +4 bytes).
-            if ((memberName == "x" || memberName == "y") && objExpr.Contains("n_gather_ps<"))
+                if ((memberName == "x" || memberName == "y") && SimdExprShapes.Of(objExpr).HasFlag(SimdExprTraits.Gather))
             {
                                 if (memberName == "y")
                 {
@@ -402,7 +392,7 @@ namespace NativeTranspiler.Analyzer
                 //   于是 `.FramesDeath` 被翻成 `simd_value<int>{...}.FramesDeath` → clang 报
                 //   「member reference base type 'int' is not a structure or union」（MarkDeadJob 实测）。
                 //   真正的向量表达式一定含 `.v`。
-                if (objExpr.Contains(".v") || objExpr.StartsWith("simd_value<"))
+                if ((SimdExprShapes.Of(objExpr) & (SimdExprTraits.LaneAccess | SimdExprTraits.Wrapper)) != 0)
                     return $"{objExpr}.{memberName}";
                 return $"{objExpr}.{memberName}()";
             }
@@ -419,6 +409,11 @@ namespace NativeTranspiler.Analyzer
             {
                 string args = string.Join(", ",
                     objCreation.ArgumentList.Arguments.Select(a => TranslateExpression(a.Expression)));
+                // 2 分量向量在 varying 上下文里构造的是 simd_value<pair>（两个分量各是 SIMD 值），
+                // 用包装初始化而不是 C++ 标量 pair 构造。
+                if (SimdVectorTypes.IsPair(cppType)
+                    && objCreation.ArgumentList.Arguments.Any(a => _varAnalyzer.ClassifyExpression(a.Expression) >= VarKind.Varying))
+                    return $"{GetSIMDTypeString(cppType)}{{ {args} }}";
                 return $"{cppType}({args})";
             }
 
@@ -436,22 +431,23 @@ namespace NativeTranspiler.Analyzer
         /// </summary>
         private static string? GetSIMDTypeString(string cppType)
         {
-            if (cppType.Contains("float2"))
+            if (SimdVectorTypes.IsFloat2(cppType))
                 return "simd_value<EntJoy::Mathematics::float2>";
-            if (cppType.Contains("int2"))
+            // uint2 的算术与 int2 位相同，沿用 int2 的寄存器类型（与旧子串判定行为一致）。
+            if (SimdVectorTypes.IsInt2(cppType) || SimdVectorTypes.IsUint2(cppType))
                 return "simd_value<EntJoy::Mathematics::int2>";
-            if (cppType == "float")
-                return "simd_value<float>";
-            if (cppType == "int")
-                return "simd_value<int>";
-            if (cppType == "bool")
-                return "simd_value<int>";
-            return null;
+            return SimdVectorTypes.LeafName(cppType) switch
+            {
+                "float" => "simd_value<float>",
+                "int" => "simd_value<int>",
+                "bool" => "simd_value<int>",
+                _ => null
+            };
         }
 
         private static bool IsFloat2Type(string cppType)
         {
-            return cppType.Contains("float2") || cppType.Contains("int2");
+            return SimdVectorTypes.IsFloat2(cppType) || SimdVectorTypes.IsInt2(cppType);
         }
     }
 }

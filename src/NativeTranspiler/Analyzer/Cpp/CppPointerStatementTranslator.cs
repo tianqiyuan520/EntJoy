@@ -118,17 +118,90 @@ namespace NativeTranspiler.Analyzer
             base.TranslateIdentifier(identifier);
         }
 
+        /// <summary>右值译文是否引用了目标这个存储（按目标最内层标识符名判断）。</summary>
+        private static bool MentionsSameStorage(ExpressionSyntax target, string rhsText)
+        {
+            var root = target.DescendantNodesAndSelf().OfType<IdentifierNameSyntax>().FirstOrDefault();
+            return root != null && rhsText.Contains(root.Identifier.Text, StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// 左值是否可安全重复发出：译文里出现两次，任何带副作用的子表达式（调用、赋值、自增自减、new、await）
+        /// 都会因此求值两遍。
+        /// </summary>
+        private static bool IsReEvaluationSafe(ExpressionSyntax target)
+            => !target.DescendantNodesAndSelf().Any(n => n
+                is InvocationExpressionSyntax
+                or AssignmentExpressionSyntax
+                or ObjectCreationExpressionSyntax
+                or AwaitExpressionSyntax
+                or PrefixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.PreIncrementExpression or (int)SyntaxKind.PreDecrementExpression }
+                or PostfixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.PostIncrementExpression or (int)SyntaxKind.PostDecrementExpression });
+
+        /// <summary>
+        /// 值被丢弃时不需要 lambda 携带旧值：可安全重复求值的左值上，自增/自减/复合赋值直接发赋值形态，
+        /// 省掉 `([&]() { … return …; }())` 这一整套包装。
+        /// </summary>
+        protected override void TranslateDiscardedValue(ExpressionSyntax expr)
+        {
+            if (EnableWrapSafeIntArithmetic && TryEmitDiscardedStep(expr)) return;
+            base.TranslateDiscardedValue(expr);
+        }
+
+        private bool TryEmitDiscardedStep(ExpressionSyntax expr)
+        {
+            ExpressionSyntax? target = null;
+            string? op = null;
+            string? rhs = null;
+            bool adding = false;
+            if (expr is PostfixUnaryExpressionSyntax post
+                && (post.IsKind(SyntaxKind.PostIncrementExpression) || post.IsKind(SyntaxKind.PostDecrementExpression)))
+            {
+                target = post.Operand;
+                adding = post.IsKind(SyntaxKind.PostIncrementExpression);
+            }
+            else if (expr is PrefixUnaryExpressionSyntax pre
+                && (pre.IsKind(SyntaxKind.PreIncrementExpression) || pre.IsKind(SyntaxKind.PreDecrementExpression)))
+            {
+                target = pre.Operand;
+                adding = pre.IsKind(SyntaxKind.PreIncrementExpression);
+            }
+            else if (expr is AssignmentExpressionSyntax asg && asg.OperatorToken.Text is "+=" or "-=" or "*=")
+            {
+                // 短形态把"读目标"和"算右值"塞进同一个表达式，二者无先后保证；
+                // 右值可能有写入（调用/赋值/自增减）或引用目标本身时，退回 lambda（先读旧值再算右值）。
+                if (!IsReEvaluationSafe(asg.Right)) return false;
+                target = asg.Left;
+                op = asg.OperatorToken.Text.Substring(0, 1);
+                rhs = CaptureExpression(asg.Right);
+                if (MentionsSameStorage(target, rhs)) return false;
+            }
+
+            if (target == null || !IsReEvaluationSafe(target)) return false;
+            if (!CppIntegerSemantics.TryGetSignedStorage(GetExpressionSpecialType(target), out var signed, out var unsigned)) return false;
+
+            string left = CppIntegerSemantics.CastOperand(CaptureExpression(target));
+            _builder.Append(left).Append(" = (").Append(signed).Append(")((").Append(unsigned).Append(')').Append(left);
+            if (rhs != null)
+                _builder.Append(' ').Append(op).Append(" (").Append(unsigned).Append(')').Append(CppIntegerSemantics.CastOperand(rhs));
+            else
+                _builder.Append(' ').Append(adding ? '+' : '-').Append(" 1u");
+            _builder.Append(')');
+            return true;
+        }
+
         protected override void TranslateAssignment(AssignmentExpressionSyntax assignment)
         {
             string op = assignment.OperatorToken.Text;
             if (EnableWrapSafeIntArithmetic && op is "+=" or "-=" or "*="
                 && CppIntegerSemantics.TryGetSignedStorage(GetExpressionSpecialType(assignment.Left), out var signed, out var unsigned))
             {
-                _builder.Append("([&]() { auto&& __ej_target = (");
-                TranslateExpression(assignment.Left);
-                _builder.Append("); ").Append(signed).Append(" __ej_old = __ej_target; auto __ej_rhs = (");
-                TranslateExpression(assignment.Right);
-                _builder.Append("); return __ej_target = (").Append(signed).Append(")((").Append(unsigned)
+                string target = CaptureExpression(assignment.Left);
+                string rhs = CaptureExpression(assignment.Right);
+                _builder.Append("([&]() { auto&& __ej_target = ").Append(CppIntegerSemantics.CastOperand(target))
+                    .Append("; ").Append(signed).Append(" __ej_old = __ej_target; auto __ej_rhs = ")
+                    .Append(CppIntegerSemantics.CastOperand(rhs))
+                    .Append("; return __ej_target = (").Append(signed).Append(")((").Append(unsigned)
                     .Append(")__ej_old ").Append(op[0]).Append(" (").Append(unsigned).Append(")__ej_rhs); }())");
                 return;
             }
@@ -535,9 +608,9 @@ namespace NativeTranspiler.Analyzer
                 && CppIntegerSemantics.TryGetSignedStorage(GetExpressionSpecialType(incremented), out var signed, out var unsigned))
             {
                 bool adding = expr.IsKind(SyntaxKind.PreIncrementExpression) || expr.IsKind(SyntaxKind.PostIncrementExpression);
-                _builder.Append("([&]() { auto&& __ej_target = (");
-                TranslateExpression(incremented);
-                _builder.Append("); ").Append(signed).Append(" __ej_old = __ej_target; __ej_target = (").Append(signed)
+                _builder.Append("([&]() { auto&& __ej_target = ")
+                    .Append(CppIntegerSemantics.CastOperand(CaptureExpression(incremented)))
+                    .Append("; ").Append(signed).Append(" __ej_old = __ej_target; __ej_target = (").Append(signed)
                     .Append(")((").Append(unsigned).Append(")__ej_old ").Append(adding ? "+" : "-").Append(" 1u); return ")
                     .Append(expr is PrefixUnaryExpressionSyntax ? "__ej_target" : "__ej_old").Append("; }())");
                 return;
@@ -557,13 +630,70 @@ namespace NativeTranspiler.Analyzer
             {
                 if (CppIntegerSemantics.TryGetSignedStorage(GetExpressionSpecialType(pre), out var negativeType, out var negativeUnsigned))
                 {
-                    _builder.Append('(').Append(negativeType).Append(")((").Append(negativeUnsigned).Append(")0 - (").Append(negativeUnsigned).Append(")(");
-                    TranslateExpression(pre.Operand);
-                    _builder.Append("))");
+                    string operand = CaptureExpression(pre.Operand);
+                    _builder.Append('(').Append(negativeType).Append(")((").Append(negativeUnsigned).Append(")0 - (")
+                        .Append(negativeUnsigned).Append(')').Append(CppIntegerSemantics.CastOperand(operand)).Append(')');
                     return;
                 }
             }
             base.TranslateExpression(expr);
+        }
+
+        /// <summary>该子表达式是否会由本翻译器发射成同宽度回绕算术（`(int)(…)`）。</summary>
+        private bool IsWrapExpression(ExpressionSyntax expression, string signed)
+        {
+            while (expression is ParenthesizedExpressionSyntax paren) expression = paren.Expression;
+            switch (expression)
+            {
+                case BinaryExpressionSyntax binary when binary.OperatorToken.Text is "+" or "-" or "*":
+                case PrefixUnaryExpressionSyntax unary when unary.IsKind(SyntaxKind.UnaryMinusExpression):
+                    return CppIntegerSemantics.TryGetSignedStorage(GetExpressionSpecialType(expression), out var childSigned, out _)
+                        && childSigned == signed;
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>
+        /// 把已译好的子表达式变成无符号回绕算术的操作数。
+        /// 子表达式本身是同宽度回绕（<c>(int)(…)</c>）时，值已经是无符号算术：去掉外层 `(unsigned)`
+        /// 与内层 `(int)` 这一对空转转换，只保留括号组（<paramref name="alreadyUnsigned"/> = true）。
+        /// 是否回绕由 AST 判定（<paramref name="knownWrap"/>），不能靠文本形状猜：用户写的 `(int)(expr)`
+        /// 与回绕输出同形，靠文本会把它的截断吞掉。
+        /// </summary>
+        private static string WrapOperand(string text, string signed, string unsigned, bool knownWrap, out bool alreadyUnsigned)
+        {
+            alreadyUnsigned = false;
+            if (!knownWrap) return CppIntegerSemantics.CastOperand(text);
+
+            string prefix = "(" + signed + ")(";
+            string candidate = text;
+            while (CppIntegerSemantics.IsWholeParenthesized(candidate))
+                candidate = candidate.Substring(1, candidate.Length - 2);
+
+            if (candidate.StartsWith(prefix, StringComparison.Ordinal) && candidate.EndsWith(")", StringComparison.Ordinal))
+            {
+                int depth = 0;
+                for (int i = prefix.Length - 1; i < candidate.Length; i++)
+                {
+                    if (candidate[i] == '(') depth++;
+                    else if (candidate[i] == ')')
+                    {
+                        depth--;
+                        if (depth == 0)
+                        {
+                            // 只有该括号正好收在末尾时整段才是"一个回绕表达式"。
+                            if (i == candidate.Length - 1)
+                            {
+                                alreadyUnsigned = true;
+                                return "(" + candidate.Substring(prefix.Length, i - prefix.Length) + ")";
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            return CppIntegerSemantics.CastOperand(text);
         }
 
         protected override void TranslateBinaryExpression(BinaryExpressionSyntax binary)
@@ -572,11 +702,15 @@ namespace NativeTranspiler.Analyzer
             if (EnableWrapSafeIntArithmetic && op is "+" or "-" or "*"
                 && CppIntegerSemantics.TryGetSignedStorage(GetExpressionSpecialType(binary), out var signed, out var unsigned))
             {
-                _builder.Append('(').Append(signed).Append(")((").Append(unsigned).Append(")(");
-                TranslateExpression(binary.Left);
-                _builder.Append(") ").Append(op).Append(" (").Append(unsigned).Append(")(");
-                TranslateExpression(binary.Right);
-                _builder.Append("))");
+                bool leftWrap = IsWrapExpression(binary.Left, signed);
+                bool rightWrap = IsWrapExpression(binary.Right, signed);
+                string left = WrapOperand(CaptureExpression(binary.Left), signed, unsigned, leftWrap, out bool leftUnsigned);
+                string right = WrapOperand(CaptureExpression(binary.Right), signed, unsigned, rightWrap, out bool rightUnsigned);
+                _builder.Append('(').Append(signed).Append(")(");
+                if (!leftUnsigned) _builder.Append('(').Append(unsigned).Append(')');
+                _builder.Append(left).Append(' ').Append(op).Append(' ');
+                if (!rightUnsigned) _builder.Append('(').Append(unsigned).Append(')');
+                _builder.Append(right).Append(')');
                 return;
             }
             base.TranslateBinaryExpression(binary);

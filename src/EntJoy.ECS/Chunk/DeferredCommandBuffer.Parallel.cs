@@ -68,7 +68,8 @@ namespace EntJoy.ECS
             return new ParallelWriter { State = _writers + index };
         }
 
-        /// <summary>回放并消费当前 writer 批次。关系命令按 sortKey 排序，普通命令的 key 为 0。</summary>
+        /// <summary>回放并消费当前 writer 批次。关系命令按 sortKey 排序，普通命令的 key 为 0。
+        /// 与单线程回放一致，先等待所有活跃 Job 完成再应用命令。</summary>
         public void PlaybackParallel(EntityManager entityManager)
         {
             if (_playingBack) throw new InvalidOperationException("ECB playback cannot be nested.");

@@ -3,7 +3,7 @@ namespace EntJoy.ECS
     /// <summary>
     /// 关系组件标记接口：声明"此组件类型用于实体间关系"。
     /// 关系类型以 RelationSlot Target 字段开头，可附带无托管引用的数据。
-    /// 普通类型为单目标，多目标类型通过 MultiRelationAttribute 声明。
+    /// 普通类型为单目标，多目标类型通过 RelationshipComponentAttribute 声明。
     /// </summary>
     public interface IRelationComponent
     {

@@ -178,6 +178,11 @@ namespace AutoSIMDVerify
             }
 
             // ═══════════ 对抗性压力测试（嵌套×分支×循环×多变量）═══════════
+            // ═══════════ pair 元素（uint2）═══════════
+            RunPairCase(ref passed, ref failed);
+            RunExpLogCase(ref passed, ref failed);
+            RunTranscendCase(ref passed, ref failed);
+            RunHighPrecisionCase(ref passed, ref failed);
             RunStress(passed: ref passed, failed: ref failed);
 
             Console.WriteLine($"\n{'=',-1}{"",-1} PASS {passed} / {passed + failed}");
@@ -185,6 +190,164 @@ namespace AutoSIMDVerify
             Console.WriteLine();
 
             NativeJobScheduler.Shutdown();
+        }
+
+        /// <summary>uint2 pair：C# 逐元素 vs AutoSIMD native，逐元素比对（含无符号 helper 与大值）。</summary>
+        private static unsafe void RunPairCase(ref int passed, ref int failed)
+        {
+            uint[] seeds = { 0u, 1u, 3u, 7u, 0x80000000u, 0xFFFFFFFEu, 0xFFFFFFFFu, 0x01000001u };
+            using var input = new NativeArray<EntJoy.Mathematics.uint2>(N, Allocator.Persistent);
+            using var expect = new NativeArray<EntJoy.Mathematics.uint2>(N, Allocator.Persistent);
+            using var actual = new NativeArray<EntJoy.Mathematics.uint2>(N, Allocator.Persistent);
+            var raw = (EntJoy.Mathematics.uint2*)input.GetUnsafePtr();
+            for (int i = 0; i < N; i++)
+                raw[i] = new EntJoy.Mathematics.uint2(seeds[i % seeds.Length], seeds[(i * 5 + 2) % seeds.Length]);
+
+            foreach (int mode in new[] { 0, 1, 2 })
+            {
+                var reference = new EntJoySample.AutoSIMDTest.PairArith_CSharp_PF { Input = input, Result = expect, Mode = mode };
+                for (int i = 0; i < N; i++) reference.Execute(i);
+                for (int i = 0; i < N; i++) ((EntJoy.Mathematics.uint2*)actual.GetUnsafePtr())[i] = new EntJoy.Mathematics.uint2(0x5A5A5A5Au, 0xA5A5A5A5u);
+
+                var job = new EntJoySample.AutoSIMDTest.PairArith_SIMD_PF { Input = input, Result = actual, Mode = mode };
+                job.Schedule(N, 0).Complete();
+
+                int errs = 0;
+                for (int i = 0; i < N; i++)
+                    if (((EntJoy.Mathematics.uint2*)actual.GetUnsafePtr())[i] != ((EntJoy.Mathematics.uint2*)expect.GetUnsafePtr())[i])
+                        errs++;
+                if (errs == 0)
+                {
+                    Console.WriteLine($"  ✅ P14 Pair uint2 (mode={mode})");
+                    passed++;
+                }
+                else
+                {
+                    Console.WriteLine($"  ❌ P14 Pair uint2 (mode={mode}) mismatches={errs}/{N}");
+                    failed++;
+                }
+            }
+        }
+
+        /// <summary>High 精度档：double 中间精度实现，与 C# 基线对照（应接近逐位一致）。</summary>
+        private static unsafe void RunHighPrecisionCase(ref int passed, ref int failed)
+        {
+            using var input = new NativeArray<float>(N, Allocator.Persistent);
+            using var expect = new NativeArray<float>(N, Allocator.Persistent);
+            using var actual = new NativeArray<float>(N, Allocator.Persistent);
+            var rnd = new Random(20261118);
+            for (int i = 0; i < N; i++) ((float*)input.GetUnsafePtr())[i] = (float)(rnd.NextDouble() * 2.0 - 1.0);
+
+            var reference = new EntJoySample.AutoSIMDTest.HighPrecision_CSharp_PF { Input = input, Result = expect };
+            for (int i = 0; i < N; i++) reference.Execute(i);
+            for (int i = 0; i < N; i++) ((float*)actual.GetUnsafePtr())[i] = float.NaN;
+
+            var job = new EntJoySample.AutoSIMDTest.HighPrecision_SIMD_PF { Input = input, Result = actual };
+            job.Schedule(N, 0).Complete();
+
+            int errs = 0;
+            float worstRel = 0;
+            for (int i = 0; i < N; i++)
+            {
+                float e = ((float*)expect.GetUnsafePtr())[i];
+                float a = ((float*)actual.GetUnsafePtr())[i];
+                float rel = MathF.Abs(a - e) / MathF.Max(1.0f, MathF.Abs(e));
+                if (rel > worstRel) worstRel = rel;
+                if (float.IsNaN(a) || rel > 1e-6f) errs++;
+            }
+
+            if (errs == 0)
+            {
+                Console.WriteLine($"  ✅ P17 High precision tier (worstRel={worstRel:E2})");
+                passed++;
+            }
+            else
+            {
+                Console.WriteLine($"  ❌ P17 High precision mismatches={errs}/{N} worstRel={worstRel:E2}");
+                failed++;
+            }
+        }
+
+        /// <summary>tan/atan/asin/acos/atan2/sinh/cosh/tanh/pow 九个函数的内联实现与 C# 基线对照。</summary>
+        private static unsafe void RunTranscendCase(ref int passed, ref int failed)
+        {
+            using var input = new NativeArray<float>(N, Allocator.Persistent);
+            using var expect = new NativeArray<float>(N, Allocator.Persistent);
+            using var actual = new NativeArray<float>(N, Allocator.Persistent);
+            var rnd = new Random(20261117);
+            for (int i = 0; i < N; i++) ((float*)input.GetUnsafePtr())[i] = (float)(rnd.NextDouble() * 2.0 - 1.0);
+
+            var reference = new EntJoySample.AutoSIMDTest.Transcend_CSharp_PF { Input = input, Result = expect };
+            for (int i = 0; i < N; i++) reference.Execute(i);
+            for (int i = 0; i < N; i++) ((float*)actual.GetUnsafePtr())[i] = float.NaN;
+
+            var job = new EntJoySample.AutoSIMDTest.Transcend_SIMD_PF { Input = input, Result = actual };
+            job.Schedule(N, 0).Complete();
+
+            int errs = 0;
+            float worstRel = 0;
+            for (int i = 0; i < N; i++)
+            {
+                float e = ((float*)expect.GetUnsafePtr())[i];
+                float a = ((float*)actual.GetUnsafePtr())[i];
+                // 9 个近似函数复合后按相对误差判定；单函数精度由 tools/MathUlpCheck 单独量。
+                float rel = MathF.Abs(a - e) / MathF.Max(1.0f, MathF.Abs(e));
+                if (rel > worstRel) worstRel = rel;
+                if (float.IsNaN(a) || rel > 1e-4f) errs++;
+            }
+
+            if (errs == 0)
+            {
+                Console.WriteLine($"  ✅ P16 tan/atan/asin/acos/atan2/sinh/cosh/tanh/pow (worstRel={worstRel:E2})");
+                passed++;
+            }
+            else
+            {
+                Console.WriteLine($"  ❌ P16 transcend mismatches={errs}/{N} worstRel={worstRel:E2}");
+                failed++;
+            }
+        }
+
+        /// <summary>exp/log10 走内联多项式：与 C# 基线做相对误差对照（Fastest 档不是逐位一致）。</summary>
+        private static unsafe void RunExpLogCase(ref int passed, ref int failed)
+        {
+            using var input = new NativeArray<float>(N, Allocator.Persistent);
+            using var expect = new NativeArray<float>(N, Allocator.Persistent);
+            using var actual = new NativeArray<float>(N, Allocator.Persistent);
+
+            // 覆盖 exp 的整段有效域与 log10 的输入范围；±1e-3 附近考察近 1 的 log10。
+            float[] seeds = { -87.0f, -40.0f, -10.0f, -1e-3f, 0.0f, 1e-3f, 1.0f, 5.0f, 20.0f, 60.0f, 88.0f };
+            for (int i = 0; i < N; i++) ((float*)input.GetUnsafePtr())[i] = seeds[i % seeds.Length];
+
+            var reference = new EntJoySample.AutoSIMDTest.ExpLog_CSharp_PF { Input = input, Result = expect };
+            for (int i = 0; i < N; i++) reference.Execute(i);
+            for (int i = 0; i < N; i++) ((float*)actual.GetUnsafePtr())[i] = float.NaN;
+
+            var job = new EntJoySample.AutoSIMDTest.ExpLog_SIMD_PF { Input = input, Result = actual };
+            job.Schedule(N, 0).Complete();
+
+            int errs = 0;
+            float worstRel = 0;
+            for (int i = 0; i < N; i++)
+            {
+                float e = ((float*)expect.GetUnsafePtr())[i];
+                float a = ((float*)actual.GetUnsafePtr())[i];
+                float scale = MathF.Max(1.0f, MathF.Abs(e));
+                float rel = MathF.Abs(a - e) / scale;
+                if (rel > worstRel) worstRel = rel;
+                if (float.IsNaN(a) || rel > 1e-5f) errs++;
+            }
+
+            if (errs == 0)
+            {
+                Console.WriteLine($"  ✅ P15 exp/log10 (worstRel={worstRel:E2})");
+                passed++;
+            }
+            else
+            {
+                Console.WriteLine($"  ❌ P15 exp/log10 mismatches={errs}/{N} worstRel={worstRel:E2}");
+                failed++;
+            }
         }
 
         private static NativeArray<float> RandF(int n, int seed, bool positive = false)

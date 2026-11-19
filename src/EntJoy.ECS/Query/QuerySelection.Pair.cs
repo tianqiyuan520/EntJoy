@@ -21,6 +21,11 @@ namespace EntJoy.ECS
         public QueryEnumerator<T0, T1> GetEnumerator()
             => new QueryEnumerator<T0, T1>(_entityManager, _builder);
 
+        /// <summary>按 Chunk 遍历：每步只推进 Chunk，循环体由调用方写，不构造逐实体结果对象。</summary>
+        public QueryChunks Chunks()
+            => new QueryChunks(_entityManager, _builder);
+
+
         /// <summary>只遍历持有 T2 关系且 target 为指定值的实体；关系仅用于过滤，不占组件位。</summary>
         public QuerySelection<T0, T1> WithRelationship<T2>(Entity target)
             where T2 : struct, IRelationComponent
@@ -35,5 +40,10 @@ namespace EntJoy.ECS
         public QuerySelection<T0, T1> WithShared<T2>(T2 filterValue)
             where T2 : struct, ISharedComponentData
             => new QuerySelection<T0, T1>(_entityManager, _builder.WithShared(filterValue));
+
+        /// <summary>只遍历 T2 在本帧被改过的 chunk。</summary>
+        public QuerySelection<T0, T1> WithChanged<T2>()
+            where T2 : struct
+            => new QuerySelection<T0, T1>(_entityManager, _builder.WithChanged<T2>());
     }
 }

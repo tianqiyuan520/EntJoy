@@ -11,7 +11,7 @@ C++ 后端按源语句生成标量代码；AutoSIMD 在可向量化的批内生�
 - 条件取反直接反转最终掩码；浮点条件更新保留比较与掩码选择，NaN、相等值和符号零按源分支选择。
 - 每条数组写入使用所在语句的活动掩码；同一函数中的其它写入保留各自的条件与顺序。标量余量复用 C++ 语句翻译。
 - `BoolVariants` 统一 C++、ISPC、托管绑定的布尔组合顺序与导出后缀。`Run` 通过原生适配器调用，与调度路径共用变体选择。
-- `AutoSIMD.Vectorize` 向 C++ 编译器请求循环向量化，默认实现与适配器一起使用无 fast-math、禁止自动 FMA 融合的编译单元。显式 `CppMathLib.fast` 使用快速浮点配置。手工 SIMD intrinsic 的误差界按所选数学模式验证，逐位一致性需要单独验证。
+- `AutoSIMD.Enabled` 生成手写 SIMD 向量体，`Disabled` 生成标量体；向量体的数学按所选 `MathPrecision` 档验证，标量体与向量体共用同一套内核（`IEEE` 档才调 libm）。手工 SIMD intrinsic 的误差界按所选数学模式验证，逐位一致性需要单独验证。
 - `AutoSIMD.Enabled` 的实现与适配器共用精确浮点编译选项；这些单元作为对象库完整链接，按名称解析的入口保留在最终动态库中。
 
 ## 循环选择
@@ -57,10 +57,204 @@ Chunk SIMD 接受单个从 0 开始、步长 1、以组件视图长度或 `chunk
 
 边界诊断见 [NativeTranspiler-Boundaries-and-Diagnostics.md](NativeTranspiler-Boundaries-and-Diagnostics.md)。生成结构测试位于 `tests/NativeTranspiler.Tests`；原生结果对照包括 `TranslationSemanticsFixture` 的掩码、同名绑定、布尔值、求值顺序、整数极值与循环边界。
 
+### 2 分量向量元素
+
+`float2` / `int2` / `uint2` 元素可以进向量路径：整元素按 gather 读、整元素按两个分量各取 lane 写回，寄存器类型统一为 `simd_value<float2>` / `simd_value<int2>`（`uint2` 与 `int2` 同布局，指针按位重新解释）。字段级读写（结构体里的 `uint2` 字段）走 `n_gather_*` 与字段偏移。
+
+`uint2` 的无符号语义由 helper 承担：`/`、`%`、`>>` 在任一侧是无符号时映射到 `simd_div_u32` / `simd_mod_u32` / `simd_shr_u32`，标量与 pair 共用同一组重载。`+`、`-`、`*` 走补码运算，与原语义一致。复合赋值（`Values[i] *= 2`）与带对象初始化器的整体结构体赋值不在支持范围，生成 `SIMD_StructCompoundAssign` / `SIMD_ObjectInitializerStore` 标记，构建期失败而不是静默错值。
+
 ```powershell
 dotnet test tests/NativeTranspiler.Tests/NativeTranspiler.Tests.csproj -c Release
 dotnet run --project tools/NativeTranspilerFixture/NativeTranspilerFixture.csproj -c Release -p:FixtureIspc=true
-dotnet build samples/EntJoySample/EntJoySample.csproj -c Release
+dotnet build samples/EntJoySample/EntJoySample.csproj -c Release -t:Rebuild
+dotnet run --project tools/AutoSIMDVerify/AutoSIMDVerify.csproj -c Release
+dotnet run --project tools/AutoSIMDEdgeCases/AutoSIMDEdgeCases.csproj -c Release
+dotnet run --project tools/AutoSIMDPerf/AutoSIMDPerf.csproj -c Release
 ```
 
+两个 `AutoSIMD*` 工具从仓库 `bin/` 拷贝 `Native*.dll` 到自己的输出目录；日志里 `fallback=none` 才说明跑的是原生产物。32 位脚本用 `-m32` 编译一个包含 `NativeGeneratedSupport.h` 的探针，必须被 `static_assert` 拦下。
+
 性能比较冻结两套完整产物，保持调度器二进制、输入、预热和测量帧数相同，交替运行多轮。单一负载的结果只说明该负载，不能作为所有 Job 都更快的结论。
+
+### Fastest 档的实测误差
+
+口径与 libm 测试一致：`err = |bits(out) - bits(ref)|`，`ref` 是 double 参考值按 round-to-nearest 折回的 float；结果次正规或为 0 时按 2^-149 的绝对误差计（AVX2、`NSIMD_WIDTH=8`、`/fp:precise`，`tools/MathUlpCheck`）。
+
+| 函数 | 输入域 | max ULP | p99.9 | 均值 |
+|---|---|---|---|---|
+| sin | [-π, π] | 1.00 | 1.00 | 0.12 |
+| sin | 到 ±1e4、1e6..1e7 | 1.00 | 1.00 | 0.16 |
+| cos | [-π, π] / ±1e4 / 1e6..1e7 | 2.00 | 1.00 | 0.16 |
+| log | [1e-37, 1e38] | 1.00 | 1.00 | 0.31 |
+| exp | [-87, 88] | 1.00 | 1.00 | 0.06 |
+| tan | [-1.5, 1.5] | 3.00 | 2.00 | 0.41 |
+| atan | [-20, 20] | 2.00 | 1.00 | 0.36 |
+| asin | [-1, 1] | 2.00 | 2.00 | 0.34 |
+| acos | [-1, 1] | 3.00 | 2.00 | 0.44 |
+| sinh | [-10, 10] | 2.00 | 1.00 | 0.27 |
+| cosh | [-10, 10] | 1.00 | 1.00 | 0.23 |
+| tanh | [-5, 5] | 2.00 | 2.00 | 0.27 |
+| atan2 | 全象限 | 2.00 | 2.00 | 0.37 |
+| pow | 底数 [0.01,10]，指数 [-3,3] | 1.00 | 1.00 | 0.02 |
+
+sin/cos 的 `|x|` 归约在 double 里完成（三段 π/2），`|x| > 1e7` 时改走 libm 逐 lane 精确归约。log 在 `|x-1| <= 0.25` 走 `log(1+t)` 级数，其余用尾数归约加两段 ln2。asin/acos 的 `1-x²` 按 `(1-x)(1+x)` 计算，sinh/cosh/tanh 在 `|x| < 0.25` 走 Taylor，pow 走 SLEEF 的 exp2(y·log2 x) 路线：指数与尾数在 float 域取出，log2 只对 [1,2) 的尾数展开，log2/exp2 都在 double 里算，最后折回 float。
+```powershell
+dotnet test tests/NativeTranspiler.Tests/NativeTranspiler.Tests.csproj -c Release
+dotnet run --project tools/NativeTranspilerFixture/NativeTranspilerFixture.csproj -c Release -p:FixtureIspc=true
+dotnet build samples/EntJoySample/EntJoySample.csproj -c Release -t:Rebuild
+dotnet run --project tools/AutoSIMDVerify/AutoSIMDVerify.csproj -c Release
+dotnet run --project tools/AutoSIMDEdgeCases/AutoSIMDEdgeCases.csproj -c Release
+dotnet run --project tools/AutoSIMDPerf/AutoSIMDPerf.csproj -c Release
+```
+
+两个 `AutoSIMD*` 工具从仓库 `bin/` 拷贝 `Native*.dll` 到自己的输出目录；日志里 `fallback=none` 才说明跑的是原生产物。32 位脚本用 `-m32` 编译一个包含 `NativeGeneratedSupport.h` 的探针，必须被 `static_assert` 拦下。
+
+性能比较冻结两套完整产物，保持调度器二进制、输入、预热和测量帧数相同，交替运行多轮。单一负载的结果只说明该负载，不能作为所有 Job 都更快的结论。
+
+### Fastest 档的实测误差
+
+精度档只作用于向量 lane 路径：生成代码的标量段（尾部元素、未向量化的 job）通过 `EJ_*` 入口调用与向量体同一套实现（精度档为 `IEEE` 时才是 libm），因此同一 job 内不会出现两套精度。`NativeSIMD_math.h` 的 `SIMD_MATH_PRECISION == 1` 分支里 `sin`/`cos`/`log`/`exp` 是内联多项式（AVX2），`log10`/`tan`/`asin`/`acos`/`atan`/`atan2`/`sinh`/`cosh`/`tanh`/`pow`/`sincos` 由它们组合而成；只有 AVX512 与非 AVX2 平台仍走逐 lane 标量回退。实测（AVX2、8 宽、`/fp:precise`，`tools/MathUlpCheck`）：
+
+| 函数 | 输入域 | absULP 最大 | absULP 均值 | relULP 最大 |
+|---|---|---|---|---|
+| sin | [-π, π] | 1.00 | 0.10 | 2.00 |
+| cos | [-π, π] | 1.00 | 0.11 | 2.00 |
+| sin | [0, 8π] | 12.06 | 2.59 | 11943 |
+| sin | [-100, 100] | 60.00 | 11.85 | 53848 |
+| sin | [-1000, 1000] | 508.00 | 107.37 | 370352 |
+| sin | [-10000, 10000] | 8185.50 | 1183.35 | 4511307 |
+| cos | [-10000, 10000] | 8174.63 | 1177.24 | 4333430 |
+| log | [1e-37, 1e38] | 128.00 | 16.57 | 8428 |
+| log | [0.999, 1.001] | 10.30 | 4.05 | 9606 |
+| exp | [-1, 1] | — | — | 1.99 |
+| exp | [-87, 88] | — | — | 2.00 |
+| log10 | [1e-37, 1e38] | 128.00 | 11.68 | — |
+| tan | [-1.5, 1.5] | 32.00 | 1.02 | 4.00 |
+| atan | [-20, 20] | 2.00 | 0.69 | 2.53 |
+| asin | [-1, 1] | 14.00 | 0.29 | 9.02 |
+| acos | [-1, 1] | 16.00 | 1.06 | — |
+| atan2 | 全象限 | 4.00 | 0.79 | 2.55 |
+| sinh | [-10, 10] | 16384 | 287 | 51.9 |
+| cosh | [-10, 10] | 16384 | 226 | 325 |
+| tanh | [-5, 5] | 1.00 | 0.26 | — |
+| pow (x>0) | 底数 [0.01,10] | — | — | 26.4 |
+
+`absULP = |out - ref| / 2^-24`，`relULP = (|out - ref| / |ref|) / 2^-24`。sin/cos 的绝对误差随 `|x|` 线性增长：三次 π/2 归约在 float 下精度有限，`|x|` 越大残余误差越大。log 的相对误差在 75 个数量级上均值 0.55 ULP，接近 1 时由绝对误差主导。
+### High 档
+
+`SIMD_MATH_PRECISION == 2` 是 double 中间精度实现（AVX2）：8 个 float lane 拆成两组 4 lane double，算完折回 float。逐函数实测（同口径标准 ULP）：
+
+| 函数 | max ULP | 相对 libm |
+|---|---|---|
+| sin / cos | 1.00 | 1.6–3.4× |
+| tan | 1.00 | 1.61× |
+| log | 1.00 | 2.96× |
+| exp | 0.00 | 2.92× |
+| atan / asin / acos | 0.00 | 1.17–2.96× |
+| sinh / cosh / tanh | 0.00 | 2.40–3.36× |
+| pow | 1.00 | 2.71× |
+
+表中 0.00 表示该域内全部样本与正确舍入结果的位模式一致。High 档在 AVX2/AVX512/NEON 上是 double lane 实现；SSE4.1 无 FMA 且只有 4 lane，High 档用 float 域实现（1–3 ULP）；AArch32 与其它平台逐 lane libm。
+### 端到端加速的构成
+
+`tools/AutoSIMDPerf` 用相同调度参数交替运行配对实现（1M 元素 × 9 轮取中位，托管基线同样走并行调度器）。总加速包含两段，必须分开看：
+
+| 层 | ns/元素 | 相对上一层 |
+|---|---|---|
+| 托管 job | 4.31 | — |
+| 原生标量（`[NativeTranspile]`，不向量化） | 1.93 | 2.23×（去掉接口分发与逐元素边界检查） |
+| 原生 SIMD（`AutoSIMD.Enabled`） | 0.60 | 3.21×（向量化） |
+
+加速比随 body 的计算密度变化（同一工具、同一输入）：
+
+| body | 标量 ns | SIMD ns | 加速 |
+|---|---|---|---|
+| `x*2.5+3` | 0.02–0.25 | 0.02–0.33 | 0.77–1.12× |
+| `sin(x)` | 0.59–0.83 | 0.14–0.39 | 2.00–4.12× |
+| `sin+cos` | 1.12–1.40 | 0.27–0.46 | 2.59–4.11× |
+| `sin+cos+log` | 1.57–1.91 | 0.42–0.44 | 3.75–4.46× |
+
+纯算术 body 已经撞到内存带宽，向量化不再带来收益；收益来自用内联多项式替代逐元素 libm 调用，以及摊薄循环开销。读数随机器负载浮动，跨运行不可相减。
+### 平台覆盖
+
+| 平台 | Fastest | High |
+|---|---|---|
+| AVX2 | 内联多项式，全函数覆盖（1–3 ULP） | double 中间精度，全函数（0–1 ULP） |
+| AVX512 | 复用 AVX2 内核（16 lane 拆两组 8 lane），全函数；组合函数用 `__mmask16` + `mask_blend` | 复用 AVX2 的 `__m256` 实现，全函数 |
+| NEON (aarch64) | 双精度归约＋float 多项式，全函数（1–3 ULP） | double lane 实现，全函数（0–1 ULP） |
+| SSE4.1 | 双精度归约＋float 多项式，全函数（1–3 ULP；`pow` 走 libm） | 同一套 float 域实现（1–3 ULP，`pow` 走 libm） |
+| AArch32 / 其它 | 逐 lane libm | 逐 lane libm |
+
+NEON 路径要求 aarch64：实现用到 `vdivq_f32` 与 `vrnd*q_f32` 等 ARMv8 指令，
+`NSIMD_NEON` 的判定只看 `__aarch64__` / `_M_ARM64`，AArch32 走标量路径。
+
+加速比（相对逐 lane libm，同进程交替 7 轮取中位，单位 ns/元素）：
+
+| 函数 | AVX2 (8-wide) | SSE4.1 (4-wide) |
+|---|---|---|
+| exp | 0.33 vs 1.90 → 5.7x | 0.90 vs 1.72 → 1.9x |
+| log | 0.54 vs 2.06 → 3.8x | 1.6 vs 1.96 → 1.2x |
+| tan | 0.61 vs 1.91 → 3.1x | 1.96 vs 1.90 → 1.0x |
+| atan | 0.29 vs 2.54 → 8.6x | 1.09 vs 2.54 → 2.3x |
+| asin | 0.65 vs 2.95 → 4.6x | 2.06 vs 2.98 → 1.4x |
+| acos | 0.74 vs 2.90 → 3.9x | 2.45 vs 2.82 → 1.1x |
+| sinh | 0.81 vs 3.26 → 4.0x | 2.2 vs 3.26 → 1.5x |
+| cosh | 0.81 vs 2.96 → 3.7x | 2.24 vs 3.0 → 1.3x |
+| tanh | 0.59 vs 2.87 → 4.9x | 1.46 vs 2.9 → 2.0x |
+| pow | 2.14 vs 4.31 → 2.0x | libm 回退 |
+
+SSE4.1 只有 4 lane 且没有 FMA，`tan`/`log`/`acos` 基本没有收益（≤1.2x）；
+AVX2 全函数都在 2x 以上。
+
+SSE4.1 的 High 档用 float 域实现（精度 1–3 ULP，不追求 ~1 ULP）：同一套算法的
+2 条 double lane 版本在本机测得 0.32–0.79x（比 libm 慢），因此不采用。
+float 域版本实测 1.02–2.11x（exp 1.81x / atan 2.11x / tanh 2.03x / tan 1.02x）。
+
+AVX512 与 NEON 的数值验证依赖模拟：本机 CPU 不支持 AVX512，也没有 ARM 设备。AVX512 在本地 Windows SDE 10.13.1 下跑通全部数学门禁；NEON 由 CI 用 `qemu-aarch64` 运行。两者都另有交叉编译的类型检查。
+
+### 定义域与特殊值
+
+定义域不逐函数手写，统一收敛到 `src/NativeDll/NativeSIMD_math.h` 顶部的一组策略函数，各平台的 `N_EXP` / `N_LOG` / `N_TANH` / `N_ATAN2` 宏在调用内核后再套一层：
+
+| 函数 | 规则 |
+|---|---|
+| `_n_dom_exp` | `+inf → +inf`，`-inf → 0`，NaN 透传；`2^n` 拆成两段等量因子，`2^128` 尾段不再少一半 |
+| `_n_dom_log` | `0 → -inf`，负数 → NaN，`+inf → +inf`，NaN 透传 |
+| `_n_dom_tanh` | `|x| > 20` → 带符号的 1，NaN 透传 |
+| `_n_dom_asin` / `_n_dom_acos` | `|x| > 1` → NaN；`acos(1)` 精确为 `+0` |
+| `_n_dom_atan2` | `±inf` 组合（`±π/2`、`±π/4`、`±3π/4`、`±0`、`±π`）与 `y = ±0` 的符号 |
+| `_n_dom_pow` | `y = ±0` 或 `x = 1` → 1；`±inf` 底数与零底数按奇偶给 `±inf` / `±0` |
+| `_n_dom_odd_zero` | `sin`/`tan`/`atan`/`asin`/`sinh`/`tanh` 在 `±0` 处返回输入，保留符号 |
+
+新增内核只要走宏就自动获得这些行为，不会出现某个精度档漏一处。
+
+float 次正规在 `log` 上先放大 2^24、结果补回 `24·ln2`，Fastest 与 High 两档一致（`log(1.4e-45) = -103.279`）。
+
+`pow` 的内核（AVX2 / NEON / libm 回退）只算 `|x|^y`，符号、奇偶、零底数、±inf 与 NaN 全部由 `_n_dom_pow` 判定：整数指数按奇偶给符号，`|y| ≥ 2^23` 视为偶数整数，因此 `pow(-0, 3) = -0`、`pow(-0, -3) = -inf`、`pow(-2, 2^23) = +inf`。
+
+奇函数（`sin`/`tan`/`atan`/`asin`/`sinh`/`tanh`）在 `x = ±0` 时返回输入本身，零的符号得以保留。`sin`/`cos` 的 Cody-Waite 归约在 `|x| > 1e7` 时改为按 lane 调 libm；`tan` 在同一阈值整条走 libm，因为分别回退的 `sin`/`cos` 相除会在极值处得到 `0/0` 或 `inf`（`tan(1e38)` 由此得到正确值）。
+
+宏层的 `N_*` 用 `[&](n_float _v){ ... }((a))` 接收实参，操作数只求值一次，带副作用的表达式也安全；`domain.cpp` 里用计数用例守住这条。
+
+### 跨平台数值门禁
+
+两个工具都跑 Fastest / High / IEEE（逐 lane libm）三档，任一断言失败时进程退出码非零：
+
+| 工具 | 覆盖 | 判定口径 |
+|---|---|---|
+| `tools/MathUlpCheck` | 各函数在连续区间上的 ULP 分布 | `|bits(out) - bits(ref)|`，次正规按 `2^-149` 计的绝对误差；非有限参考值不计入（区间采样里溢出属正常） |
+| `tools/MathUlpCheck/domain.cpp` | 223 项定点用例：`0`/`±0`/负数/`±inf`/NaN/次正规、`exp` 溢出边界、`pow` 定点、`atan2` 十四象限、`N_SINCOS`、`N_LOG10`，并校验宏参数只求值一次 | 按结果类别比对（NaN / `±inf` / `±0` / 有限值），类别不符即失败 |
+
+`ENTJOY_MATH_ISA` 选择目标指令集。`.github/workflows/native-math.yml` 五个作业：
+
+| 作业 | 指令集 | 运行方式 |
+|---|---|---|
+| `avx2` | AVX2 | 托管 runner 原生运行，Fastest 与 High 两档的 ULP 与定义域门禁 |
+| `avx512` | AVX512 | 编译门禁严格；数值执行经 Intel SDE，托管 runner 上 SDE 会 SIGSEGV，因此该步只是 best effort（同一产物在本地 Windows SDE 10.13.1 上跑通） |
+| `sse41` | SSE4.1 | `-msse4.1 -mno-avx` 原生运行，Fastest / High / IEEE 三档门禁 |
+| `neon` | NEON (aarch64) | `aarch64-linux-gnu-g++` 交叉编译后由 `qemu-aarch64` 运行，Fastest 与 High 两档门禁（IEEE 档在 avx2/sse41 上验证） |
+| `arm32` | AArch32 | `-mfpu=neon -mfloat-abi=hard` 后由 `qemu-arm` 运行；数学走标量回退，验证回退路径 |
+
+`pow` 在 SSE4.1 与 AArch32 上回退 libm；NEON 的 High 档 `pow` 也回退 libm，Fastest 档是内联实现。回退实现与内联内核一样只返回 `|x|^y`，符号由 `_n_dom_pow` 补，避免同一结果被处理两次。
+
+发布门禁 `EntJoy Release Gate` 里的 `math-gate` 作业跑同一套 Fastest / High / IEEE 三档门禁，并在最终 `needs` 里，因此改数学会挡住发布。

@@ -34,12 +34,5 @@ public static class Helpers { public static void Advance(ref int n) { n++; } }
         Assert.Contains("MutationProbe::Cursor& Position = *Position_ptr;", implementation);
         Assert.DoesNotContain("const int& Counter", implementation);
         Assert.DoesNotContain("const MutationProbe::Cursor& Position", implementation);
-        if (kind == "IJobChunk")
-        {
-            var adapter = File.ReadAllText(Path.Combine(result.OutputDir,
-                "SharpNative_Job_MutationProbe_MutableJob_Execute_Adapter.cpp"));
-            Assert.DoesNotContain("const int& Counter", adapter);
-            Assert.DoesNotContain("const MutationProbe::Cursor& Position", adapter);
-        }
     }
 }

@@ -14,98 +14,13 @@ namespace NativeTranspiler.Analyzer.Common
 {
     public static partial class IspcGenerator
     {
-        private static string GenerateIspcChunkMTSource(INamedTypeSymbol jobStruct, Compilation compilation)
-        {
-            var sb = new StringBuilder();
-            var baseName = GetIspcBaseName(jobStruct);
-            sb.AppendLine($"// Auto-generated ISPC MT source for {jobStruct.Name}");
 
-            var fields = GetFieldsFromJob(jobStruct);
-            var includes = CollectMethodIncludes(jobStruct.GetMembers().OfType<IMethodSymbol>().First(method => method.Name == Config.Execute), compilation, fields);
-            var chunkArrays = CppJobGenerator.IsEntityJob(jobStruct)
-                ? CollectEntityNativeArrays(jobStruct)
-                : CollectChunkNativeArrayLocals(jobStruct, compilation);
-            foreach (var component in CppJobGenerator.CollectChunkNativeArrayTypes(jobStruct, compilation))
-                includes.Add(NativeTranspiler.GetStructHeaderFileName(component));
-            // SendEvent: 事件类型 include
-            foreach (var evtType in CppJobGenerator.CollectSendEventTypes(jobStruct, compilation))
-                includes.Add(NativeTranspiler.GetStructHeaderFileName(evtType));
-            WriteIspcPreamble(sb, fields, includes.OrderBy(x => x).ToList());
-
-            var executeMethod = jobStruct.GetMembers().OfType<IMethodSymbol>().First(m => m.Name == Config.Execute);
-            var methodSyntax = SymbolHelper.GetMethodSyntax(executeMethod);
-            if (methodSyntax?.Body == null) return "// Error: no Execute body";
-            var semanticModel = compilation.GetSemanticModel(methodSyntax.SyntaxTree);
-            var paramsList = BuildIspcChunkParamList(chunkArrays, fields);
-            // SendEvent: 追加 EventBuffer 参数（仅当 Job 使用 SendEvent）
-            bool usesSendEvent = CppJobGenerator.JobUsesSendEvent(jobStruct, compilation);
-            if (usesSendEvent)
-                // 注意：ISPC 中 "uniform void*" 非法（void 不能带 uniform 限定），必须用 "void* uniform"（指针 uniform）
-                paramsList += ", void* uniform __eventBufferHeaders, uniform int __eventBufferCount";
-            string entityCountExpr = "__entity_count";
-            string taskParams = paramsList;
-
-            sb.AppendLine($"task void {baseName}_task({taskParams})");
-            sb.AppendLine("{");
-            sb.AppendLine($"{Indent}uniform int n_per_task = max(1, {entityCountExpr} / taskCount);");
-            sb.AppendLine($"{Indent}uniform int __task_start = taskIndex * n_per_task;");
-            sb.AppendLine($"{Indent}uniform int __task_end = (taskIndex == taskCount - 1) ? {entityCountExpr} : min(__task_start + n_per_task, {entityCountExpr});");
-            AppendUniformVariableDeclarations(sb, jobStruct);
-
-            var translator = new IspcChunkStatementTranslator(semanticModel, jobStruct, "__task_start", "__task_end");
-            if (usesSendEvent)
-                translator.SetEventBufferParamName("__eventBufferHeaders");
-            sb.Append(translator.Translate(methodSyntax.Body));
-            sb.AppendLine("}");
-            sb.AppendLine();
-
-            string mtParams = $"{paramsList}, uniform int numTasks";
-            sb.AppendLine($"export void {baseName}_mt_impl({mtParams})");
-            sb.AppendLine("{");
-            string callArgs = $"{BuildIspcCallArgsForChunkMT(chunkArrays, fields)}, __entity_count, __query_bits, __query_length";
-            if (usesSendEvent)
-                callArgs += ", __eventBufferHeaders, __eventBufferCount";
-            sb.AppendLine($"{Indent}launch[max(1, numTasks)] {baseName}_task({callArgs});");
-            sb.AppendLine($"{Indent}sync;");
-            sb.AppendLine("}");
-
-            return sb.ToString();
-        }
-
-        private static string BuildIspcCallArgsForChunkMT(
-            List<(INamedTypeSymbol type, string name)> chunkArrays,
-            IEnumerable<(ITypeSymbol type, string name)> fields)
-        {
-            var args = new List<string>();
-            foreach (var (_, name) in chunkArrays)
-            {
-                args.Add($"{name}_ptr");
-            }
-            foreach (var (type, name) in fields)
-            {
-                if (NativeTranspiler.IsEntJoyNativeContainerType(type))
-                {
-                    args.Add(NativeTranspiler.IsEntJoyContainerNamed(type, Config.NativeList) ? name : $"{name}_ptr, {name}_length");
-                }
-                else
-                {
-                    args.Add($"{name}_ptr");
-                }
-            }
-            return string.Join(", ", args);
-        }
-
-        private static string GenerateCppEntityBatchWrapper(INamedTypeSymbol jobStruct, Compilation compilation, bool useMt = false)
+        private static string GenerateCppEntityBatchWrapper(INamedTypeSymbol jobStruct, Compilation compilation)
         {
             var sb = new StringBuilder();
             var ispcBase = GetIspcBaseName(jobStruct);
             var ispcHeaderBase = ispcBase;
-            var ispcImplBase = ispcBase;  // for MT, redirect to non-MT ISPC functions
-            if (useMt)
-            {
-                ispcHeaderBase = ispcBase.Replace("IspcMt", "Ispc");
-                ispcImplBase = ispcBase.Replace("IspcMt", "Ispc");
-            }
+            var ispcImplBase = ispcBase;
             var ispcImplName = ispcImplBase + "_impl";
             var adapterFuncName = CppJobGenerator.GetEntityBatchAdapterFunctionName(jobStruct);
             var adapterGetterName = CppJobGenerator.GetEntityBatchAdapterPtrGetterName(jobStruct);
@@ -116,33 +31,9 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine("#include \"NativeContainers.h\"");
             sb.AppendLine("#include \"EntityBatchData.h\"");
             sb.AppendLine($"#include \"{ispcHeaderBase}_ispc.h\"");
-            if (useMt)
-            {
-                sb.AppendLine("#include <thread>");
-                sb.AppendLine("#include <cstdint>");
-            }
-            sb.AppendLine(CodeTemplates.GenerateExportMacros());
+            sb.AppendLine("#include \"NativeGeneratedSupport.h\"");
             sb.AppendLine();
             GenerateResizeCallbacks(sb, fields.Select(f => (f.Type, f.Name)));
-            sb.AppendLine();
-            sb.AppendLine("#ifndef __EntJoyChunkContextHeader_DEFINED");
-            sb.AppendLine("#define __EntJoyChunkContextHeader_DEFINED");
-            sb.AppendLine("struct __EntJoyChunkContextHeader");
-            sb.AppendLine("{");
-            sb.AppendLine("    int chunkCount;");
-            sb.AppendLine("    int hasEnabledFilter;");
-            sb.AppendLine("    void* queryAllEnabledTypes;");
-            sb.AppendLine("    int allEnabledCount;");
-            sb.AppendLine("    int gcHandleStartIndex;");
-            sb.AppendLine("    void* chunksPtr;");
-            sb.AppendLine("    int cleanupInProgress;");
-            sb.AppendLine("    int ownsChunkData;");
-            sb.AppendLine("    void* requiredComponentTypeIds;");
-            sb.AppendLine("    int requiredComponentTypeIdCount;");
-            sb.AppendLine("    int jobIsBoxed;");
-            sb.AppendLine("    void* chunkArrayHandle;");
-            sb.AppendLine("};");
-            sb.AppendLine("#endif");
             sb.AppendLine();
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {adapterFuncName}(void* context, const EntityBatchData* __batches, int __batch_start, int __batch_count)");
             sb.AppendLine("{");
@@ -153,18 +44,18 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine("    char* __jobContext = (char*)context + __headerSize + __typesDataSize + __requiredTypesDataSize;");
             sb.AppendLine();
 
-            int currentOffset = 0;
             var fieldArgs = new List<string>();
-            foreach (var field in fields)
+            foreach (var slot in CppJobGenerator.BuildFieldLayout(jobStruct))
             {
-                int offset = CppJobGenerator.CalculateFieldOffset(field, ref currentOffset);
-                var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
+                var cppType = slot.CppType;
                 var ispcType = IspcTypeMapper.FromCpp(cppType);
-                if (IsVectorType(cppType) || cppType.Contains("::"))
-                    sb.AppendLine($"    auto* {field.Name}_ptr = reinterpret_cast<ispc::{ispcType}*>(({cppType}*)(__jobContext + {offset}));");
+                string address = CppIntegerSemantics.CastOperand(
+                    CppIntegerSemantics.JobAddress("__jobContext", slot.Offset));
+                if (IsVectorType(cppType) || cppType.Contains("::") || IsUserStructType(slot.Field.Type))
+                    sb.AppendLine($"    auto* {slot.Field.Name}_ptr = reinterpret_cast<ispc::{ispcType}*>(({cppType}*){address});");
                 else
-                    sb.AppendLine($"    auto* {field.Name}_ptr = ({cppType}*)(__jobContext + {offset});");
-                fieldArgs.Add($"{field.Name}_ptr");
+                    sb.AppendLine($"    auto* {slot.Field.Name}_ptr = ({cppType}*){address};");
+                fieldArgs.Add($"{slot.Field.Name}_ptr");
             }
 
             // Per-batch loop: read from EntityBatchData directly (single hop).
@@ -200,24 +91,12 @@ namespace NativeTranspiler.Analyzer.Common
             return sb.ToString();
         }
 
-        private static string GenerateCppChunkWrapper(INamedTypeSymbol jobStruct, Compilation compilation, bool useMt = false)
+        private static string GenerateCppChunkWrapper(INamedTypeSymbol jobStruct, Compilation compilation)
         {
             var sb = new StringBuilder();
             var ispcBase = GetIspcBaseName(jobStruct);
-            string ispcImplName;
-            string ispcHeaderBase;
-            if (useMt && CppJobGenerator.IsEntityJob(jobStruct))
-            {
-                // IJobEntity ISPC MT: 复用非 MT 的 ISPC 实现（函数名相同）
-                var nonMtBase = ispcBase.Replace("IspcMt", "Ispc");
-                ispcImplName = nonMtBase + "_impl";
-                ispcHeaderBase = nonMtBase;  // 非 MT header，无 _mt 后缀
-            }
-            else
-            {
-                ispcImplName = useMt ? ispcBase + "_mt_impl" : ispcBase + "_impl";
-                ispcHeaderBase = useMt ? ispcBase + "_mt" : ispcBase;
-            }
+            string ispcImplName = ispcBase + "_impl";
+            string ispcHeaderBase = ispcBase;
             var adapterFuncName = CppJobGenerator.GetAdapterFunctionName(jobStruct);
             var adapterGetterName = CppJobGenerator.GetAdapterPtrGetterName(jobStruct);
             var rangeAdapterFuncName = CppJobGenerator.GetRangeAdapterFunctionName(jobStruct);
@@ -255,44 +134,9 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine("#include \"ChunkJobData.h\"");
             sb.AppendLine("#include \"ChunkNativeArray.h\"");
             sb.AppendLine($"#include \"{ispcHeaderBase}_ispc.h\"");
-            if (useMt)
-                sb.AppendLine("#include <thread>");
-            sb.AppendLine(CodeTemplates.GenerateExportMacros());
+            sb.AppendLine("#include \"NativeGeneratedSupport.h\"");
             sb.AppendLine();
             GenerateResizeCallbacks(sb, fields.Select(f => (f.Type, f.Name)));
-            sb.AppendLine();
-            sb.AppendLine("#ifndef __EntJoyChunkContextHeader_DEFINED");
-            sb.AppendLine("#define __EntJoyChunkContextHeader_DEFINED");
-            sb.AppendLine("struct __EntJoyChunkContextHeader");
-            sb.AppendLine("{");
-            sb.AppendLine("    int chunkCount;");
-            sb.AppendLine("    int hasEnabledFilter;");
-            sb.AppendLine("    void* queryAllEnabledTypes;");
-            sb.AppendLine("    int allEnabledCount;");
-            sb.AppendLine("    int gcHandleStartIndex;");
-            sb.AppendLine("    void* chunksPtr;");
-            sb.AppendLine("    int cleanupInProgress;");
-            sb.AppendLine("    int ownsChunkData;");
-            sb.AppendLine("    void* requiredComponentTypeIds;");
-            sb.AppendLine("    int requiredComponentTypeIdCount;");
-            sb.AppendLine("    int jobIsBoxed;");
-            sb.AppendLine("    void* chunkArrayHandle;");
-            sb.AppendLine("    // Event Buffer（与 C# ChunkContextHeader 对齐，SendEvent 需要）");
-            sb.AppendLine("    int eventBufferCount;");
-            sb.AppendLine("    void* eventBufferHeaders;");
-            sb.AppendLine("    void* eventWorldHandle;");
-            sb.AppendLine("};");
-            sb.AppendLine("#endif");
-            sb.AppendLine();
-            sb.AppendLine("#ifndef __EntJoyEventBuffer_DEFINED");
-            sb.AppendLine("#define __EntJoyEventBuffer_DEFINED");
-            sb.AppendLine("struct __EntJoyEventBuffer {");
-            sb.AppendLine("    int* data;");
-            sb.AppendLine("    int* count;");
-            sb.AppendLine("    int capacity;");
-            sb.AppendLine("    int elementSize;");
-            sb.AppendLine("};");
-            sb.AppendLine("#endif");
             sb.AppendLine();
             sb.AppendLine($"GENERATED_API void CALLINGCONVENTION {adapterFuncName}(void* context, const ChunkJobData* __chunkData)");
             sb.AppendLine("{");
@@ -379,7 +223,7 @@ namespace NativeTranspiler.Analyzer.Common
                 {
                     var cppType = NativeTranspiler.MapCSharpTypeToCpp(field.Type);
                     var ispcType = IspcTypeMapper.FromCpp(cppType);
-                    if (IsVectorType(cppType) || cppType.Contains("::"))
+                    if (IsVectorType(cppType) || cppType.Contains("::") || IsUserStructType(field.Type))
                     {
                         sb.AppendLine($"    auto* {field.Name}_ptr = reinterpret_cast<ispc::{ispcType}*>(({cppType}*)(__jobContext + {offset}));");
                     }
@@ -408,8 +252,6 @@ namespace NativeTranspiler.Analyzer.Common
                 callArgs.Add("(void*)__header->eventBufferHeaders");
                 callArgs.Add("__header->eventBufferCount");
             }
-            if (useMt && !CppJobGenerator.IsEntityJob(jobStruct))
-                callArgs.Add("std::thread::hardware_concurrency()");
             sb.AppendLine($"    ispc::{ispcImplName}({string.Join(", ", callArgs)});");
 
             foreach (var field in fields)
@@ -448,6 +290,106 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine($"    return (void*){rangeAdapterFuncName};");
             sb.AppendLine("}");
             return sb.ToString();
+        }
+
+        /// <summary>发射「每个 lane 一个标量槽」的循环，带查询过滤时换算回实体下标查掩码。</summary>
+        private static void EmitFlatLoop(StringBuilder sb, string flatBody, int slots)
+        {
+            var lines = flatBody.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.RemoveEmptyEntries);
+            sb.AppendLine($"{Indent}const uniform int __slots = {slots};");
+            sb.AppendLine($"{Indent}if (__query_length == 0) {{");
+            sb.AppendLine($"{Indent}{Indent}foreach_tiled (__flat = 0 ... __entity_count * __slots)");
+            sb.AppendLine($"{Indent}{Indent}{{");
+            foreach (var line in lines) sb.Append($"{Indent}{Indent}{Indent}").Append(line).AppendLine();
+            sb.AppendLine($"{Indent}{Indent}}}");
+            sb.AppendLine($"{Indent}}} else {{");
+            sb.AppendLine($"{Indent}{Indent}foreach_tiled (__flat = 0 ... __entity_count * __slots)");
+            sb.AppendLine($"{Indent}{Indent}{{");
+            sb.AppendLine($"{Indent}{Indent}{Indent}int __ei = __flat / __slots;");
+            sb.AppendLine($"{Indent}{Indent}{Indent}if ((__query_bits[__ei >> 6] & ((uint64)1 << (__ei & 63))) == 0) continue;");
+            foreach (var line in lines) sb.Append($"{Indent}{Indent}{Indent}").Append(line).AppendLine();
+            sb.AppendLine($"{Indent}{Indent}}}");
+            sb.AppendLine($"{Indent}}}");
+        }
+
+        /// <summary>
+        /// 摊平实体内核：判据在 <see cref="FlatShape"/> 里按语法树给出，这里只负责发射。
+        /// 访问重写只针对生成器自己发射的 `参数_ptr[__entity_index].字段`，判据已证明没有别的访问。
+        /// </summary>
+        private static bool TryEmitFlattenedEntityLoop(StringBuilder sb, IspcStatementTranslator translator,
+            string bodyCode, BlockSyntax body, IMethodSymbol executeMethod, SemanticModel semanticModel, out int slots)
+        {
+            slots = 0;
+            var shape = FlatShape.TryAnalyze(body, executeMethod, semanticModel);
+            if (shape == null) return false;
+
+            string flatBody;
+            if (shape.ScalarFields)
+            {
+                var canonical = shape.Statements[0];
+                var ordinals = new Dictionary<LiteralExpressionSyntax, int>();
+                foreach (var literal in canonical.DescendantNodes().OfType<LiteralExpressionSyntax>())
+                    if (literal.Token.IsKind(SyntaxKind.NumericLiteralToken))
+                        ordinals[literal] = ordinals.Count;
+                translator.SetFlatLiteralFormatter(literal =>
+                    ordinals.TryGetValue(literal, out int index) ? EmitSlotConstants(translator, shape, index) : null);
+                flatBody = translator.CaptureStatement(canonical);
+                translator.SetFlatLiteralFormatter(null);
+            }
+            else
+            {
+                flatBody = bodyCode;
+            }
+
+            flatBody = System.Text.RegularExpressions.Regex.Replace(flatBody,
+                @"([A-Za-z_]\w*)_ptr\[__entity_index\]\.[A-Za-z_]\w*",
+                m => $"(({shape.ScalarType}*){m.Groups[1].Value}_ptr)[__flat]");
+            if (flatBody.Contains("__entity_index")) return false;
+
+            EmitFlatLoop(sb, flatBody, shape.Slots);
+            slots = shape.Slots;
+            return true;
+        }
+
+        /// <summary>按槽取常量：各槽一致就放原字面量，否则发 `__flat % __slots` 的 select 链。</summary>
+        private static string EmitSlotConstants(IspcStatementTranslator translator, FlatShape shape, int ordinal)
+        {
+            var perSlot = new List<string>();
+            foreach (var literals in shape.LiteralsPerSlot)
+            {
+                if (literals == null || ordinal >= literals.Count) return null;
+                perSlot.Add(translator.CaptureExpression(literals[ordinal]));
+            }
+            if (perSlot.Distinct().Count() == 1) return perSlot[0];
+            string expression = perSlot[perSlot.Count - 1];
+            for (int slot = perSlot.Count - 2; slot >= 0; slot--)
+                expression = $"(  __flat % __slots == {slot} ? {perSlot[slot]} : {expression} )";
+            return expression;
+        }
+        /// <summary>
+        /// 翻译 chunk Execute 体。出现串行循环时整个函数按 uniform 语义重译一遍：
+        /// 循环外的中转/累加局部（`T head = values[0];`、`int sum = 0;`）必须是 uniform，
+        /// 否则 varying 值赋给 uniform 定位过不了 ISPC 编译（G297C951C）。
+        /// </summary>
+        private static string TranslateChunkBody(SemanticModel semanticModel, INamedTypeSymbol jobStruct,
+            MethodDeclarationSyntax methodSyntax, string? foreachStart, string? foreachEnd,
+            bool usesSendEvent, out bool usesSerial)
+        {
+            IspcChunkStatementTranslator Create(bool uniformVars)
+            {
+                var translator = foreachStart == null
+                    ? new IspcChunkStatementTranslator(semanticModel, jobStruct, uniformVars)
+                    : new IspcChunkStatementTranslator(semanticModel, jobStruct, foreachStart, foreachEnd, uniformVars);
+                if (usesSendEvent)
+                    translator.SetEventBufferParamName("__eventBufferHeaders");
+                return translator;
+            }
+
+            var first = Create(false);
+            string body = first.Translate(methodSyntax.Body);
+            usesSerial = first.UsesSerialChunkLoop;
+            if (!usesSerial) return body;
+            return Create(true).Translate(methodSyntax.Body);
         }
 
         private static void GenerateIspcChunkFunction(StringBuilder sb, string functionName,
@@ -498,21 +440,64 @@ namespace NativeTranspiler.Analyzer.Common
                 if (usesSendEvent)
                     entityTranslator.SetEventBufferParamName("__eventBufferHeaders");
                 var bodyCode = entityTranslator.Translate(methodSyntax.Body);
-                sb.AppendLine(scalar ? "    for (uniform int __entity_index = 0; __entity_index < __entity_count; ++__entity_index) {"
-                    : "    foreach_tiled (__entity_index = 0 ... __entity_count) {");
-                sb.AppendLine("        if (__query_length != 0 && (__query_bits[__entity_index >> 6] & ((uint64)1 << (__entity_index & 63))) == 0) continue;");
-                // Entity 参数解引用为局部结构体（body 内通过 entity.Id / entity.Version 访问）
-                foreach (var ep in entityParams)
-                    sb.AppendLine($"{Indent}{Indent}{(scalar ? "uniform " : "")}__EntJoyEntity {ep.Name} = {ep.Name}_ptr[__entity_index];");
-                foreach (var parameter in executeMethod.Parameters)
-                    if (NativeTranspileValidator.IsRelationComponentType(parameter.Type) && parameter.RefKind == RefKind.None)
-                        sb.AppendLine($"{Indent}{Indent}{(scalar ? "uniform " : "")}{IspcTypeMapper.FromCpp(NativeTranspiler.MapCSharpTypeToCpp(parameter.Type))} {parameter.Name} = {parameter.Name}_ptr[__entity_index];");
-                foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
+
+                // 分量摊平：组件是「单字段包装的 float2/3/4」且循环体对所有分量做同一套运算时，
+                // 把每个 lane 从"一个结构体"改成"一个标量分量"，访存变连续。
+                // 实测轻量实体内核：逐字段 0.3861 ms → 摊平 0.0311 ms（标量 C++ 0.0330 ms）。
+                if (!scalar && entityParams.Count == 0
+                    && TryEmitFlattenedEntityLoop(sb, entityTranslator, bodyCode, methodSyntax.Body,
+                        executeMethod, semanticModel, out _))
                 {
-                    if (line.Length == 0) continue;
-                    sb.Append(Indent).Append(line).AppendLine();
+                    sb.AppendLine("}");
+                    return;
                 }
-                sb.AppendLine("    }");
+
+
+                // 实体循环：先按"是否带查询过滤"分成两版，而不是每 lane 查一次掩码。
+                // 掩码检查在无过滤（__query_length == 0，最常见）时纯属开销；实测轻量体 1.2×。
+                void EmitEntityLoop(bool masked, string extraIndent)
+                {
+                    sb.AppendLine($"{extraIndent}    foreach_tiled (__entity_index = 0 ... __entity_count) {{");
+                    if (masked)
+                        sb.AppendLine($"{extraIndent}        if ((__query_bits[__entity_index >> 6] & ((uint64)1 << (__entity_index & 63))) == 0) continue;");
+                    // Entity 参数解引用为局部结构体（body 内通过 entity.Id / entity.Version 访问）
+                    foreach (var ep in entityParams)
+                        sb.AppendLine($"{extraIndent}{Indent}{Indent}__EntJoyEntity {ep.Name} = {ep.Name}_ptr[__entity_index];");
+                    foreach (var parameter in executeMethod.Parameters)
+                        if (NativeTranspileValidator.IsRelationComponentType(parameter.Type) && parameter.RefKind == RefKind.None)
+                            sb.AppendLine($"{extraIndent}{Indent}{Indent}{IspcTypeMapper.FromCpp(NativeTranspiler.MapCSharpTypeToCpp(parameter.Type))} {parameter.Name} = {parameter.Name}_ptr[__entity_index];");
+                    foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
+                    {
+                        if (line.Length == 0) continue;
+                        sb.Append(extraIndent).Append(Indent).Append(line).AppendLine();
+                    }
+                    sb.AppendLine($"{extraIndent}    }}");
+                }
+
+                if (scalar)
+                {
+                    sb.AppendLine("    for (uniform int __entity_index = 0; __entity_index < __entity_count; ++__entity_index) {");
+                    sb.AppendLine("        if (__query_length != 0 && (__query_bits[__entity_index >> 6] & ((uint64)1 << (__entity_index & 63))) == 0) continue;");
+                    foreach (var ep in entityParams)
+                        sb.AppendLine($"{Indent}{Indent}uniform __EntJoyEntity {ep.Name} = {ep.Name}_ptr[__entity_index];");
+                    foreach (var parameter in executeMethod.Parameters)
+                        if (NativeTranspileValidator.IsRelationComponentType(parameter.Type) && parameter.RefKind == RefKind.None)
+                            sb.AppendLine($"{Indent}{Indent}uniform {IspcTypeMapper.FromCpp(NativeTranspiler.MapCSharpTypeToCpp(parameter.Type))} {parameter.Name} = {parameter.Name}_ptr[__entity_index];");
+                    foreach (var line in bodyCode.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None))
+                    {
+                        if (line.Length == 0) continue;
+                        sb.Append(Indent).Append(line).AppendLine();
+                    }
+                    sb.AppendLine("    }");
+                }
+                else
+                {
+                    sb.AppendLine("    if (__query_length == 0) {");
+                    EmitEntityLoop(masked: false, extraIndent: Indent);
+                    sb.AppendLine("    } else {");
+                    EmitEntityLoop(masked: true, extraIndent: Indent);
+                    sb.AppendLine("    }");
+                }
             }
             else
             {
@@ -523,10 +508,10 @@ namespace NativeTranspiler.Analyzer.Common
                     return;
                 }
                 // IJobChunk: use IspcChunkStatementTranslator
-                var translator = new IspcChunkStatementTranslator(semanticModel, jobStruct);
-                if (usesSendEvent)
-                    translator.SetEventBufferParamName("__eventBufferHeaders");
-                var bodyCode2 = translator.Translate(methodSyntax.Body);
+                var bodyCode2 = TranslateChunkBody(semanticModel, jobStruct, methodSyntax, null, null,
+                    usesSendEvent, out bool usesSerialLoop);
+                if (usesSerialLoop)
+                    sb.AppendLine($"{Indent}if (programIndex != 0) return;");
                 AppendIspcBody(sb, bodyCode2);
             }
 
@@ -636,3 +621,4 @@ namespace NativeTranspiler.Analyzer.Common
 
     }
 }
+

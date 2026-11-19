@@ -104,8 +104,10 @@ namespace NativeTranspiler.Analyzer.Common
         public static string GenerateIspcMTSource(INamedTypeSymbol jobStruct, Compilation compilation, HashSet<INamedTypeSymbol> userStructs)
         {
 
+            // chunk 级作业的并行度由调度器跨 chunk 提供：chunk 内再开 ISPC 任务会与外层线程池嵌套，
+            // 且单个 chunk（16 KiB ≈ 数百实体）远小于 ISPC 任务的合理粒度。NT038 已拦截这种组合。
             if (CppJobGenerator.IsChunkJob(jobStruct))
-                return GenerateIspcChunkMTSource(jobStruct, compilation);
+                return "// ISPC MT is not generated for IJobChunk / IJobEntity jobs.";
 
             if (!CppJobGenerator.IsParallelForJob(jobStruct) && !CppJobGenerator.IsForJob(jobStruct))
                 return "// ISPC MT only supports IJobParallelFor / IJobFor.";
@@ -163,7 +165,7 @@ namespace NativeTranspiler.Analyzer.Common
             foreach (var include in CppJobGenerator.CollectJobStructIncludes(jobStruct, compilation))
                 sb.AppendLine($"#include \"{include}.h\"");
             sb.AppendLine($"#include \"{ispcBase}_ispc.h\"");
-            sb.AppendLine(CodeTemplates.GenerateExportMacros());
+            sb.AppendLine("#include \"NativeGeneratedSupport.h\"");
             sb.AppendLine();
 
             var fields = GetFieldsFromJob(jobStruct);
@@ -223,18 +225,9 @@ namespace NativeTranspiler.Analyzer.Common
         /// <summary>生成 Job 的 C++ Wrapper（多线程）</summary>
         public static string GenerateCppWrapperMT(INamedTypeSymbol jobStruct, Compilation compilation)
         {
-            if (CppJobGenerator.IsEntityJob(jobStruct))
-            {
-                var attrSym = AttributeHelper.GetAttributeSymbol(compilation);
-                bool isIspc = attrSym != null && AttributeHelper.GetBackendTarget(jobStruct, attrSym) == NativeTranspiler.BackendTarget.Ispc;
-                if (isIspc)
-                    return GenerateCppChunkWrapper(jobStruct, compilation, useMt: true);
-                return GenerateCppEntityBatchWrapper(jobStruct, compilation, useMt: true);
-            }
-
+            // chunk 级作业没有 MT wrapper：并行度由调度器按 chunk 提供（见 NT038）。
             if (CppJobGenerator.IsChunkJob(jobStruct))
-                return GenerateCppChunkWrapper(jobStruct, compilation, useMt: true);
-
+                return "// ISPC MT wrapper is not generated for IJobChunk / IJobEntity jobs.";
             if (!CppJobGenerator.IsParallelForJob(jobStruct) && !CppJobGenerator.IsForJob(jobStruct))
                 return "// IJob does not have MT version.";
 
@@ -246,7 +239,7 @@ namespace NativeTranspiler.Analyzer.Common
             sb.AppendLine("#include \"NativeContainers.h\"");
             sb.AppendLine($"#include \"{ispcBase}_mt_ispc.h\"");
             sb.AppendLine("#include <thread>");
-            sb.AppendLine(CodeTemplates.GenerateExportMacros());
+            sb.AppendLine("#include \"NativeGeneratedSupport.h\"");
             sb.AppendLine();
 
             GenerateResizeCallbacks(sb, fields);
@@ -382,15 +375,31 @@ namespace NativeTranspiler.Analyzer.Common
             {
                 // Execute 的索引由调度区间确定；内层循环保留逐索引的执行顺序。
                 AppendUniformVariableDeclarations(sb, jobStruct);
-                sb.AppendLine($"{Indent}foreach ({indexParamName} = __startIndex ... __startIndex + __count) {{");
+                // 零基 foreach + 相对寻址：ISPC 只有在索引相对批起点时才把 `A[index + k]` 的
+                // 常量偏移折进指令位移；绝对区间会让它为每个 k 现算一次字节偏移。
+                sb.AppendLine($"{Indent}foreach ({IspcStatementTranslator.BatchRelativeVar} = 0 ... __count) {{");
+                sb.AppendLine($"{Indent}    int {indexParamName} = {IspcStatementTranslator.BatchRelativeVar} + __startIndex;");
                 var translator = new IspcStatementTranslator(semanticModel, jobStruct, constBoolFields, constBoolValues);
                 translator.SetInsideForeach(true);
                 translator.SetInsideBatchIndexLoop(true);
+                translator.SetBatchRelativeIndex("__startIndex", ExecuteIndexParameter(semanticModel, methodSyntax, indexParamName));
                 var bodyCode = translator.Translate(methodSyntax.Body);
                 AppendIspcBody(sb, bodyCode, 2);
                 sb.AppendLine($"{Indent}}}");
             }
             sb.AppendLine("}");
+        }
+
+        /// <summary>Execute 的索引形参符号；找不到时返回 null（批内相对寻址会因此关闭，退回绝对寻址）。</summary>
+        private static IParameterSymbol ExecuteIndexParameter(SemanticModel semanticModel,
+            MethodDeclarationSyntax methodSyntax, string indexParamName)
+        {
+            foreach (var parameter in methodSyntax.ParameterList.Parameters)
+            {
+                if (parameter.Identifier.Text != indexParamName) continue;
+                if (semanticModel.GetDeclaredSymbol(parameter) is IParameterSymbol symbol) return symbol;
+            }
+            return null;
         }
 
         /// <summary>生成 IJob 的 ISPC 函数（无循环、无 __startIndex/__count）</summary>
@@ -401,6 +410,30 @@ namespace NativeTranspiler.Analyzer.Common
             var fields = GetFieldsFromJob(jobStruct);
             // IJob: 无 __startIndex/__count，直接传入 field ptrs
             var paramsList = BuildIspcParamList(fields, false);
+
+            // 整个 Execute 体就是一个逐元素循环时，去掉 lane 守卫改发 foreach：
+            // 否则 IJob 在 ISPC 里只有一个 lane 干活，比 C++ 的自动向量化还慢。
+            if (DataParallelLoop.TryGetSole(methodSyntax.Body, semanticModel,
+                    out var parallelLoop, out string parallelVar, out var parallelStart, out var parallelEnd))
+            {
+                sb.AppendLine($"export void {functionName}({paramsList})");
+                sb.AppendLine("{");
+                AppendUniformVariableDeclarations(sb, jobStruct);
+                var parallelTranslator = new IspcStatementTranslator(semanticModel, jobStruct, null, false, useUniformVars: false);
+                string startText = parallelTranslator.CaptureExpression(parallelStart);
+                string boundText = parallelTranslator.CaptureExpression(parallelEnd);
+                parallelTranslator.SetInsideForeach(true);
+                sb.AppendLine($"{Indent}foreach ({parallelVar} = {startText} ... {boundText})");
+                sb.AppendLine($"{Indent}{{");
+                AppendIspcBody(sb, parallelLoop.Statement is BlockSyntax parallelBlock
+                    ? parallelTranslator.Translate(parallelBlock)
+                    : parallelTranslator.TranslateSingleStatement(parallelLoop.Statement), 2);
+                sb.AppendLine($"{Indent}}}");
+                sb.AppendLine("}");
+                return;
+            }
+
+            // 整段 Execute 体不是单个逐元素循环：退回一个 lane 执行整个体。
             sb.AppendLine($"export void {functionName}({paramsList})");
             sb.AppendLine("{");
             sb.AppendLine($"{Indent}if (programIndex != 0) return;");

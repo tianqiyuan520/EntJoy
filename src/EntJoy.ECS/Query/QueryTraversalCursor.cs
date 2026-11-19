@@ -11,8 +11,6 @@ namespace EntJoy.ECS
         internal readonly EntityManager Manager;
         internal readonly QueryBuilder Filter;
         internal readonly bool HasEntityFilter;
-        // 无实体/Shared/变更过滤：Chunk 全量命中，可按预计算表推进。
-        internal readonly bool CanUseChunkTable;
         private readonly ComponentType[] _columns;
         private int _archetypeVersion = -1;
         private ArchetypeColumns[] _archetypes = Array.Empty<ArchetypeColumns>();
@@ -24,22 +22,20 @@ namespace EntJoy.ECS
         internal sealed class TraversalSnapshot
         {
             internal static readonly TraversalSnapshot Empty = new(
-                Array.Empty<Chunk>(), Array.Empty<nint>(), Array.Empty<QueryChunkEntry>(), Array.Empty<int>(), 0);
+                Array.Empty<Chunk>(), Array.Empty<nint>(), Array.Empty<int>(), 0);
 
             internal readonly Chunk[] Chunks;
             internal readonly nint[] ComponentBases;
-            internal readonly QueryChunkEntry[] ChunkTable;
             internal readonly int[] RelationColumns;
             // 本代数组按多少个块分配（只增不减，复用判据）
             internal readonly int Capacity;
             // 本次发布的有效块数；发布线程填完再发布
             internal int ChunkCount;
 
-            internal TraversalSnapshot(Chunk[] chunks, nint[] componentBases, QueryChunkEntry[] chunkTable, int[] relationColumns, int capacity)
+            internal TraversalSnapshot(Chunk[] chunks, nint[] componentBases, int[] relationColumns, int capacity)
             {
                 Chunks = chunks;
                 ComponentBases = componentBases;
-                ChunkTable = chunkTable;
                 RelationColumns = relationColumns;
                 Capacity = capacity;
                 ChunkCount = 0;
@@ -81,8 +77,6 @@ namespace EntJoy.ECS
             Manager = manager;
             Filter = filter;
             HasEntityFilter = filter.HasRelationshipFilter || (filter.AllEnabled != null && filter.AllEnabled.Length > 0);
-            CanUseChunkTable = !HasEntityFilter && !filter.HasSharedFilter
-                && (filter.ChangedComponents == null || filter.ChangedComponents.Length == 0);
             _columns = columns;
         }
 
@@ -132,14 +126,6 @@ namespace EntJoy.ECS
                         int offset = archetype.Offsets[column];
                         snapshot.ComponentBases[first + column] = offset < 0 ? 0 : chunk.MemoryBlock + offset;
                     }
-                    if (CanUseChunkTable)
-                    {
-                        snapshot.ChunkTable[count] = new QueryChunkEntry(
-                            snapshot.ComponentBases[first],
-                            ColumnCount > 1 ? snapshot.ComponentBases[first + 1] : 0,
-                            ColumnCount > 2 ? snapshot.ComponentBases[first + 2] : 0,
-                            chunk.EntityCount);
-                    }
                     if (Filter.HasRelationshipFilter) snapshot.RelationColumns[count] = archetype.RelationColumn;
                     count++;
                 }
@@ -153,31 +139,10 @@ namespace EntJoy.ECS
             var fresh = new TraversalSnapshot(
                 new Chunk[capacity],
                 new nint[checked(capacity * ColumnCount)],
-                CanUseChunkTable ? new QueryChunkEntry[capacity] : Array.Empty<QueryChunkEntry>(),
                 Filter.HasRelationshipFilter ? new int[capacity] : Array.Empty<int>(),
                 capacity);
             _generations[_generation] = fresh;
             return fresh;
-        }
-    }
-
-    /// <summary>
-    /// 可整块命中的查询的每 Chunk 推进数据：前 3 列基址与实体数，与计划中 Chunk 顺序一致。
-    /// 第 4 列起没有内联基址，宽元组走 <see cref="QueryTraversalCursor.Next"/> 路径。
-    /// </summary>
-    public readonly struct QueryChunkEntry
-    {
-        public readonly nint Base0;
-        public readonly nint Base1;
-        public readonly nint Base2;
-        public readonly int Count;
-
-        internal QueryChunkEntry(nint base0, nint base1, nint base2, int count)
-        {
-            Base0 = base0;
-            Base1 = base1;
-            Base2 = base2;
-            Count = count;
         }
     }
 
@@ -197,6 +162,11 @@ namespace EntJoy.ECS
         private int _count;
         private ulong _enabledWord;
         private int _enabledWordIndex;
+        // 关系过滤的块内不变量：目标列基址、槽宽、每实体槽数随块只算一次，逐实体只做比较。
+        private byte* _relationBase;
+        private int _relationSize;
+        private int _relationSlots;
+        private int _rangeEnd;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public QueryTraversalCursor(EntityManager manager, QueryBuilder builder, ComponentType[] columns)
@@ -215,12 +185,17 @@ namespace EntJoy.ECS
             _count = 0;
             _enabledWord = 0;
             _enabledWordIndex = -1;
+            _relationBase = null;
+            _relationSize = 0;
+            _relationSlots = 0;
+            _rangeEnd = 0;
         }
 
         public readonly bool HasChunk => _count != 0;
         public readonly int Slot => _slot;
-        public readonly int RangeEnd => !HasChunk ? 0 : !_plan.HasEntityFilter ? _count
-            : _plan.Filter.HasRelationshipFilter ? _slot + 1 : QueryEntityRange.End(_enabledWord, _slot, _count);
+        public readonly int RangeEnd => !HasChunk ? 0
+            : !_plan.HasEntityFilter ? _count
+            : _rangeEnd;
         public readonly Chunk Chunk => HasChunk
             ? _snapshot.Chunks[_chunkIndex] : default;
         public ref readonly Chunk ChunkReference
@@ -232,6 +207,10 @@ namespace EntJoy.ECS
             }
         }
 
+        /// <summary>按快照下标取 Chunk；调用方保证 index 在快照的有效块数内。</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal readonly ref readonly Chunk ChunkAt(int index) => ref _snapshot.Chunks[index];
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public readonly nint ComponentBase(int column)
         {
@@ -239,16 +218,9 @@ namespace EntJoy.ECS
             return _snapshot.ComponentBases[_baseIndex + column];
         }
 
-        /// <summary>计划能否按预计算表整块推进；为 false 时用 <see cref="Next"/> 逐实体过滤。</summary>
-        public readonly bool CanUseChunkTable => _plan.CanUseChunkTable && !_hasChunkFilter;
-
-        public readonly int ChunkCount => _snapshot.ChunkCount;
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public readonly ref readonly QueryChunkEntry ChunkEntry(int index) => ref _snapshot.ChunkTable[index];
-
+        /// <summary>推进到 slot 所在的下一个可用段并就地更新游标；按引用传参避免逐段复制整个游标。</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
-        public static QueryTraversalCursor Next(QueryTraversalCursor cursor, int slot)
+        public static void Next(ref QueryTraversalCursor cursor, int slot)
         {
             cursor._slot = slot;
             if (!cursor._plan.HasEntityFilter)
@@ -256,7 +228,6 @@ namespace EntJoy.ECS
                 if (cursor._count == 0 || slot >= cursor._count) cursor.MoveNextChunk(out _);
             }
             else cursor.Advance();
-            return cursor;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -277,6 +248,7 @@ namespace EntJoy.ECS
                 _slot = 0;
                 _enabledWord = 0;
                 _enabledWordIndex = -1;
+                PrepareRelationColumn(chunk);
                 return true;
             }
             _chunkIndex = _snapshot.ChunkCount;
@@ -326,7 +298,43 @@ namespace EntJoy.ECS
                         if (mask == 0) { _slot = (wordIndex + 1) << 6; continue; }
                         _slot += BitOperations.TrailingZeroCount(mask);
                         if (_slot >= _count) break;
-                        if (MatchesRelationship(chunk)) return;
+                        if (MatchesRelationship())
+                        {
+                            // 纯位图过滤：整字启用时区间跨字延伸，全启用块只推进一次。
+                            if (!_plan.Filter.HasRelationshipFilter)
+                            {
+                                int runStart = _slot;
+                                int end = QueryEntityRange.End(_enabledWord, _slot, _count);
+                                while (end < _count && (end & 63) == 0)
+                                {
+                                    _enabledWordIndex = end >> 6;
+                                    _enabledWord = QueryEntityRange.EnabledWord(chunk, enabled, _enabledWordIndex);
+                                    int next = QueryEntityRange.End(_enabledWord, end, _count);
+                                    if (next == end) break;
+                                    end = next;
+                                }
+                                _rangeEnd = end;
+                                _slot = runStart;
+                                return;
+                            }
+                            int start = _slot;
+                            while (true)
+                            {
+                                _slot++;
+                                if (_slot >= _count) break;
+                                int nextWord = _slot >> 6;
+                                if (nextWord != _enabledWordIndex)
+                                {
+                                    _enabledWord = QueryEntityRange.EnabledWord(chunk, enabled, nextWord);
+                                    _enabledWordIndex = nextWord;
+                                }
+                                if (((_enabledWord >> (_slot & 63)) & 1UL) == 0) break;
+                                if (!MatchesRelationship()) break;
+                            }
+                            _rangeEnd = _slot;
+                            _slot = start;
+                            return;
+                        }
                         _slot++;
                     }
                 }
@@ -334,25 +342,45 @@ namespace EntJoy.ECS
                 {
                     while (_slot < _count)
                     {
-                        if (MatchesRelationship(chunk)) return;
+                        if (MatchesRelationship())
+                        {
+                            // 连续命中段整段返回：调用方按段走，不必逐实体再进一次 Advance。
+                            int start = _slot;
+                            while (++_slot < _count && MatchesRelationship()) { }
+                            _rangeEnd = _slot;
+                            _slot = start;
+                            return;
+                        }
                         _slot++;
                     }
                 }
             }
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private readonly bool MatchesRelationship(Chunk chunk)
+        /// <summary>块切换时取出该块的关系列基址、槽宽与每实体槽数；逐实体判定只做比较与乘法。</summary>
+        private void PrepareRelationColumn(Chunk chunk)
         {
-            if (!_plan.Filter.HasRelationshipFilter) return true;
+            _relationBase = null;
+            _relationSlots = 0;
+            if (!_plan.Filter.HasRelationshipFilter) return;
             var type = _plan.Filter.RelationshipFilterType;
             int maxSlots = type.MultiRelationMaxSlots;
-            if (type.IsMultiRelation && maxSlots == 0)
-                return _plan.Query.MatchesRelationshipTarget(chunk, _slot, _target);
+            if (type.IsMultiRelation && maxSlots == 0) return;
             int column = _snapshot.RelationColumns[_chunkIndex];
-            byte* value = (byte*)chunk.GetComponentArrayPointer(column) + _slot * type.Size;
-            for (int i = 0; i < Math.Max(1, maxSlots); i++)
-                if (((RelationSlot*)value)[i].Matches(_target)) return true;
+            _relationBase = (byte*)chunk.GetComponentArrayPointer(column);
+            _relationSize = type.Size;
+            _relationSlots = Math.Max(1, maxSlots);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private readonly bool MatchesRelationship()
+        {
+            if (!_plan.Filter.HasRelationshipFilter) return true;
+            if (_relationBase == null)
+                return _plan.Query.MatchesRelationshipTarget(_snapshot.Chunks[_chunkIndex], _slot, _target);
+            var slots = (RelationSlot*)(_relationBase + _slot * _relationSize);
+            for (int i = 0; i < _relationSlots; i++)
+                if (slots[i].Matches(_target)) return true;
             return false;
         }
     }

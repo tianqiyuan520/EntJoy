@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 using Unity.Burst;
+using Unity.Burst.Intrinsics;
 using Unity.Collections;
 using Unity.Entities;
 using UnityEngine;
@@ -34,6 +35,90 @@ public partial struct PlayerBurstQuery : ISystem
 }
 
 public struct Player_Components : IComponentData { public int Value; }
+
+// Chunk 级遍历臂：与 Arch / EntJoy 的 chunk foreach 同构，job.Run 同步执行、不调度。
+[BurstCompile]
+public struct PlayerChunkJob2 : IJobChunk
+{
+    public ComponentTypeHandle<PlayerBenchA> A;
+    public ComponentTypeHandle<PlayerBenchB> B;
+
+    [BurstCompile]
+    public void Execute(in ArchetypeChunk chunk, int unfilteredChunkIndex, bool useEnabledMask, in v128 chunkEnabledMask)
+    {
+        var a = chunk.GetNativeArray(ref A);
+        var b = chunk.GetNativeArray(ref B);
+        for (int i = 0; i < chunk.Count; i++)
+        {
+            var v = a[i];
+            v.Value += b[i].Value;
+            a[i] = v;
+        }
+    }
+}
+
+[BurstCompile]
+public struct PlayerChunkJob3 : IJobChunk
+{
+    public ComponentTypeHandle<PlayerBenchA> A;
+    public ComponentTypeHandle<PlayerBenchB> B;
+    public ComponentTypeHandle<PlayerBenchC> C;
+
+    [BurstCompile]
+    public void Execute(in ArchetypeChunk chunk, int unfilteredChunkIndex, bool useEnabledMask, in v128 chunkEnabledMask)
+    {
+        var a = chunk.GetNativeArray(ref A);
+        var b = chunk.GetNativeArray(ref B);
+        var c = chunk.GetNativeArray(ref C);
+        for (int i = 0; i < chunk.Count; i++)
+        {
+            var v = a[i];
+            v.Value += b[i].Value + c[i].Value;
+            a[i] = v;
+        }
+    }
+}
+
+[BurstCompile]
+[DisableAutoCreation]
+public partial struct PlayerBurstChunk : ISystem
+{
+    private EntityQuery _query2;
+    private EntityQuery _query3;
+
+    public void OnCreate(ref SystemState state)
+    {
+        _query2 = state.GetEntityQuery(
+            ComponentType.ReadWrite<PlayerBenchA>(), ComponentType.ReadOnly<PlayerBenchB>());
+        _query3 = state.GetEntityQuery(
+            ComponentType.ReadWrite<PlayerBenchA>(), ComponentType.ReadOnly<PlayerBenchB>(),
+            ComponentType.ReadOnly<PlayerBenchC>());
+    }
+
+    [BurstCompile]
+    public void OnUpdate(ref SystemState state)
+    {
+        if (SystemAPI.GetSingleton<Player_Components>().Value == 2)
+        {
+            var job = new PlayerChunkJob2
+            {
+                A = state.GetComponentTypeHandle<PlayerBenchA>(false),
+                B = state.GetComponentTypeHandle<PlayerBenchB>(true),
+            };
+            job.Run(_query2);
+        }
+        else
+        {
+            var job = new PlayerChunkJob3
+            {
+                A = state.GetComponentTypeHandle<PlayerBenchA>(false),
+                B = state.GetComponentTypeHandle<PlayerBenchB>(true),
+                C = state.GetComponentTypeHandle<PlayerBenchC>(true),
+            };
+            job.Run(_query3);
+        }
+    }
+}
 
 /// <summary>非 Burst 的托管对照臂，用于判定播放器里 Burst 是否真的生效。</summary>
 [DisableAutoCreation]
@@ -70,6 +155,14 @@ public static class PlayerMatrix
     private static void Boot()
     {
         string logPath = Arg("-matrixLog");
+        string structLog = Arg("-structLog");
+        if (!string.IsNullOrEmpty(structLog))
+        {
+            RunStruct(structLog, ParseIntList("-structEntities", new[] { 1024, 10_000, 100_000 }),
+                ParseInt("-structRounds", 25));
+            Application.Quit();
+            return;
+        }
         if (string.IsNullOrEmpty(logPath)) return;
         try
         {
@@ -97,6 +190,96 @@ public static class PlayerMatrix
             ? parsed : fallback;
     }
 
+    private static int[] ParseIntList(string name, int[] fallback)
+    {
+        string value = Arg(name);
+        if (string.IsNullOrEmpty(value)) return fallback;
+        string[] parts = value.Split(',');
+        var result = new int[parts.Length];
+        for (int i = 0; i < parts.Length; i++)
+        {
+            if (!int.TryParse(parts[i], NumberStyles.Integer, CultureInfo.InvariantCulture, out result[i]))
+                return fallback;
+        }
+        return result;
+    }
+
+    // 结构变更：与 tools/EcsComparison 的 StructuralBench 同协议，四操作按轮取最小，
+    // 复位一律在计时之外。播放器口径（Mono + EntityManager 安全检查开）。
+    private static void RunStruct(string logPath, int[] entityCounts, int rounds)
+    {
+        var output = new StringBuilder();
+        var world = new World("player-struct");
+        try
+        {
+            EntityManager em = world.EntityManager;
+            EntityArchetype arch2 = em.CreateArchetype(typeof(PlayerBenchA), typeof(PlayerBenchB));
+            EntityArchetype arch3 = em.CreateArchetype(typeof(PlayerBenchA), typeof(PlayerBenchB), typeof(PlayerBenchC));
+            var sw = new Stopwatch();
+
+            foreach (int entities in entityCounts)
+            {
+                output.AppendLine($"STRUCT_HEAD entities={entities} rounds={rounds} framework=Unity compiler=mono-player opt=jit safety_checks=on");
+                var buffer = new Entity[entities];
+                double minCreate = double.MaxValue, minAdd = double.MaxValue;
+                double minRemove = double.MaxValue, minDestroy = double.MaxValue;
+
+                for (int r = 1; r <= rounds; r++)
+                {
+                    sw.Restart();
+                    for (int i = 0; i < entities; i++) buffer[i] = em.CreateEntity(arch2);
+                    sw.Stop();
+                    double us = sw.Elapsed.TotalMilliseconds * 1000.0;
+                    if (us < minCreate) minCreate = us;
+                    output.AppendLine($"STRUCT_ROW op=create framework=Unity round={r} us={us.ToString("F1", CultureInfo.InvariantCulture)}");
+                    for (int i = 0; i < entities; i++) em.DestroyEntity(buffer[i]);
+
+                    for (int i = 0; i < entities; i++) buffer[i] = em.CreateEntity(arch2);
+                    sw.Restart();
+                    for (int i = 0; i < entities; i++) em.AddComponent<PlayerBenchC>(buffer[i]);
+                    sw.Stop();
+                    us = sw.Elapsed.TotalMilliseconds * 1000.0;
+                    if (us < minAdd) minAdd = us;
+                    output.AppendLine($"STRUCT_ROW op=add framework=Unity round={r} us={us.ToString("F1", CultureInfo.InvariantCulture)}");
+                    for (int i = 0; i < entities; i++) em.DestroyEntity(buffer[i]);
+
+                    for (int i = 0; i < entities; i++) buffer[i] = em.CreateEntity(arch3);
+                    sw.Restart();
+                    for (int i = 0; i < entities; i++) em.RemoveComponent<PlayerBenchC>(buffer[i]);
+                    sw.Stop();
+                    us = sw.Elapsed.TotalMilliseconds * 1000.0;
+                    if (us < minRemove) minRemove = us;
+                    output.AppendLine($"STRUCT_ROW op=remove framework=Unity round={r} us={us.ToString("F1", CultureInfo.InvariantCulture)}");
+                    for (int i = 0; i < entities; i++) em.DestroyEntity(buffer[i]);
+
+                    for (int i = 0; i < entities; i++) buffer[i] = em.CreateEntity(arch2);
+                    sw.Restart();
+                    for (int i = 0; i < entities; i++) em.DestroyEntity(buffer[i]);
+                    sw.Stop();
+                    us = sw.Elapsed.TotalMilliseconds * 1000.0;
+                    if (us < minDestroy) minDestroy = us;
+                    output.AppendLine($"STRUCT_ROW op=destroy framework=Unity round={r} us={us.ToString("F1", CultureInfo.InvariantCulture)}");
+                }
+
+                output.AppendLine(string.Format(CultureInfo.InvariantCulture,
+                    "STRUCT_MIN entities={0} create={1:F1} add={2:F1} remove={3:F1} destroy={4:F1}",
+                    entities, minCreate, minAdd, minRemove, minDestroy));
+                File.WriteAllText(logPath, output.ToString());
+            }
+        }
+        catch (Exception e)
+        {
+            output.AppendLine("STRUCT_ERROR " + e);
+        }
+        finally
+        {
+            world.Dispose();
+        }
+
+        File.WriteAllText(logPath, output.ToString());
+        Debug.Log(output.ToString());
+    }
+
     private static void Run(string logPath, int count, int components)
     {
         var output = new StringBuilder();
@@ -121,6 +304,8 @@ public static class PlayerMatrix
         Action run = () => handle.Update(world.Unmanaged);
         var managedHandle = world.CreateSystem<PlayerManagedQuery>();
         Action runManaged = () => managedHandle.Update(world.Unmanaged);
+        var chunkHandle = world.CreateSystem<PlayerBurstChunk>();
+        Action runChunk = () => chunkHandle.Update(world.Unmanaged);
         using var query = components == 2
             ? em.CreateEntityQuery(typeof(PlayerBenchA), typeof(PlayerBenchB))
             : em.CreateEntityQuery(typeof(PlayerBenchA), typeof(PlayerBenchB), typeof(PlayerBenchC));
@@ -134,6 +319,9 @@ public static class PlayerMatrix
         Append(metadata, run, query, count, components, 0);
         runManaged();
         Append(metadata.Replace("backend=Burst kernel=Compiler", "backend=CSharp kernel=Scalar"), runManaged, query, count, components, callsPerArm);
+        runChunk();
+        Append($"framework=Unity layer=Chunk api=IJobChunk backend=Burst kernel=Compiler entities={count} components={components} chunks={chunkCount}",
+            runChunk, query, count, components, callsPerArm * 2);
         File.WriteAllText(logPath, output.ToString());
         Debug.Log(output.ToString());
 

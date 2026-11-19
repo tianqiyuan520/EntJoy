@@ -132,6 +132,25 @@ namespace NativeTranspiler.Analyzer
 
         // Local Declaration
 
+        /// <summary>初始化式是否是钳位表达式（clamp / min(max(…), …)）：这类索引已保证在界内，后续 gather 不再钳位。</summary>
+        private static bool IsClampingExpression(ExpressionSyntax? expr)
+        {
+            if (expr is not InvocationExpressionSyntax invocation) return false;
+            string name = invocation.Expression switch
+            {
+                MemberAccessExpressionSyntax member => member.Name.Identifier.Text,
+                IdentifierNameSyntax id => id.Identifier.Text,
+                _ => ""
+            };
+            if (name is "clamp" or "Clamp") return true;
+            if (name is not ("min" or "Min")) return false;
+            foreach (var argument in invocation.ArgumentList.Arguments)
+                if (argument.Expression is InvocationExpressionSyntax inner
+                    && inner.Expression is MemberAccessExpressionSyntax innerMember
+                    && innerMember.Name.Identifier.Text is "max" or "Max")
+                    return true;
+            return false;
+        }
         private void GenerateLocalDeclaration(LocalDeclarationStatementSyntax stmt)
         {
             foreach (var variable in stmt.Declaration.Variables)
@@ -147,13 +166,15 @@ namespace NativeTranspiler.Analyzer
                 if (variable.Initializer?.Value is ElementAccessExpressionSyntax structInitEA
                     && structInitEA.Expression is IdentifierNameSyntax structInitArrId
                     && _nativeArrayParams.TryGetValue(structInitArrId.Identifier.Text, out var structInitElemType)
-                    && structInitElemType != "float" && structInitElemType != "int"
-                    && !structInitElemType.Contains("float2") && !structInitElemType.Contains("int2"))
+                    && !IsBuiltinScalarElem(structInitElemType)
+                    && !SimdVectorTypes.IsPair(structInitElemType))
                 {
-                    string idxExpr = structInitEA.ArgumentList?.Arguments.Count > 0
-                        ? TranslateExpression(structInitEA.ArgumentList.Arguments[0].Expression)
-                        : "0";
-                    _structVaryingLocals[name] = (structInitArrId.Identifier.Text, structInitElemType, idxExpr);
+                    ExpressionSyntax? idxSyntax = structInitEA.ArgumentList?.Arguments.Count > 0
+                        ? structInitEA.ArgumentList.Arguments[0].Expression
+                        : null;
+                    string idxExpr = idxSyntax != null ? TranslateExpression(idxSyntax) : "0";
+                    bool varyingIndex = idxSyntax != null && _varAnalyzer.ClassifyExpression(idxSyntax) >= VarKind.Varying;
+                    _structVaryingLocals[name] = (structInitArrId.Identifier.Text, structInitElemType, idxExpr, varyingIndex);
                     continue;
                 }
 
@@ -165,12 +186,19 @@ namespace NativeTranspiler.Analyzer
                     if (variable.Initializer != null)
                     {
                         string initExpr = TranslateVaryingValue(variable.Initializer.Value, info.CppType);
+                        // uint2 用 int2 寄存器承载：初始化式是裸元素/字段读取、且发射结果还是标量值时才要
+                        // 显式转 int2（已是 gather/simd 值的不能再包）；否则 uint2 → int2 → simd_value<int2>
+                        // 是两次用户转换，clang 拒绝。
+                        if (SimdVectorTypes.IsUint2(info.CppType)
+                            && variable.Initializer.Value is ElementAccessExpressionSyntax or MemberAccessExpressionSyntax
+                            && SimdExprShapes.Of(initExpr) == SimdExprTraits.None)
+                            initExpr = $"simd_value<EntJoy::Mathematics::int2>(EntJoy::Mathematics::int2({initExpr}))";
                         {
                             _varDeclEmitted.Add(name);
                             _simdVaryingVarNames.Add(name);
                             _simdVaryingCppType[name] = info.CppType;
-                            if (initExpr.Contains("simd_min") && initExpr.Contains("simd_max"))
-                                _clampedVars.Add($"v_{name}");
+                            if (IsClampingExpression(variable.Initializer?.Value))
+                                _clampedVars.Add(name);
                             AppendLine($"{varType} v_{name} = {initExpr};");
                         }
                     }
@@ -187,14 +215,8 @@ namespace NativeTranspiler.Analyzer
                         // ISPC-style SIMD promotion: when a Uniform local is initialized from a
                         //   SIMD register expression (e.g. gather result), promote to Varying and
                         //   This keeps the data in SIMD registers throughout the computation chain.
-                        bool isSimdExpr = initExpr.StartsWith("simd_")
-                            || initExpr.StartsWith("(simd_")
-                            || initExpr.StartsWith("(v_")
-                            || (initExpr.Contains("simd_value<") && initExpr.Contains("n_"))
-                            || initExpr.Contains("n_gather_ps<")
-                            || initExpr.Contains("n_sin_ps")
-                            || initExpr.Contains("n_cos_ps")
-                            || initExpr.Contains("n_sqrt_ps");
+                        bool isSimdExpr = _varAnalyzer.ClassifyExpression(variable.Initializer.Value) >= VarKind.Varying
+                            && SimdExprShapes.Of(initExpr) != SimdExprTraits.None;
                         if (isSimdExpr)
                         {
                             string simdType = GetSIMDTypeString(cppType);
@@ -212,10 +234,12 @@ namespace NativeTranspiler.Analyzer
                             }
                         }
                         AppendLine($"{cppType} {name} = {initExpr};");
+                        _scalarUniformNames.Add(name);
                     }
                     else
                     {
                         AppendLine($"{cppType} {name};");
+                        _scalarUniformNames.Add(name);
                     }
                 }
             }

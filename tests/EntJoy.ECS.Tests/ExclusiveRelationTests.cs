@@ -5,7 +5,7 @@ using Xunit;
 namespace EntJoy.ECS.Tests
 {
     /// <summary>独占关系（真 1:1）：target 侧唯一约束，新 Add 自动解绑旧 source。</summary>
-    [ExclusiveRelation]
+    [RelationshipComponent(ExclusiveTarget = true)]
     public struct OccupiedBy : IRelationComponent { public RelationSlot Target; }
 
     public class ExclusiveRelationTests
@@ -94,8 +94,8 @@ namespace EntJoy.ECS.Tests
         public void Exclusive_ComponentType_Flagged()
         {
             var ct = ComponentTypeManager.GetComponentType(typeof(OccupiedBy));
-            Assert.True(ct.IsExclusiveRelation);
-            Assert.False(ComponentTypeManager.GetComponentType(typeof(ChildOf)).IsExclusiveRelation);
+            Assert.True(ct.IsExclusiveTarget);
+            Assert.False(ComponentTypeManager.GetComponentType(typeof(ChildOf)).IsExclusiveTarget);
         }
     }
 }

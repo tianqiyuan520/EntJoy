@@ -39,6 +39,22 @@ namespace NativeTranspiler.Analyzer
             return GeneratePerLane(scalarBody);
         }
 
+        /// <summary>
+        /// 作业字段上的容器即 native array：元素类型要按 MapCSharpTypeToCpp 建表，
+        /// 否则翻译器认不出数组元素、元素读退化成 lane0 标量读。
+        /// </summary>
+        private static Dictionary<string, string> BuildNativeArrayParams(INamedTypeSymbol? jobStruct)
+        {
+            var result = new Dictionary<string, string>();
+            if (jobStruct == null) return result;
+            foreach (var field in jobStruct.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+                if (NativeTranspiler.IsEntJoyContainerNamed(field.Type, "NativeArray")
+                    && field.Type is INamedTypeSymbol container)
+                    result[field.Name] = NativeTranspiler.MapCSharpTypeToCpp(
+                        NativeTranspiler.GetContainerElementType(container));
+            return result;
+        }
+
         private string GenerateFullSIMDFromAST(string scalarBody)
         {
             if (_jobStruct == null || _methodSyntax.Body == null) return "";
@@ -62,6 +78,7 @@ namespace NativeTranspiler.Analyzer
                     indexParamName: _idx, simdIndexVar: "v_i",
                     boolFields: _boolFields,
                     simdMathPrecision: _simdMathPrecision,
+                    nativeArrayParams: BuildNativeArrayParams(_jobStruct),
                     batchLoopVar: "si");   // 启用连续 load/store 优化（v_i → ptr+si）
 
                 string simdBody = cfGenerator.Generate(_methodSyntax.Body);
@@ -73,11 +90,96 @@ namespace NativeTranspiler.Analyzer
                 sb.AppendLine("        __simd_exit: ;");
                 sb.AppendLine("        }");
                 sb.AppendLine("    }");
-                if (!string.IsNullOrEmpty(scalarBody))
-                    sb.Append(RemainderLoop(scalarBody));
+                bool covered = EmitOverlapTail(sb, simdBody);
+            if (!string.IsNullOrEmpty(scalarBody))
+                sb.Append(RemainderLoop(scalarBody, narrowOnly: covered, aliasFallback: _aliasGuard));
                 return sb.ToString();
         }
 
+        /// <summary>尾部用一个与主循环重叠的完整向量迭代覆盖：偏移取总末端减宽度，
+        /// 重叠部分重算出同样的值，因此不需要掩码访问。返回是否覆盖了尾部。</summary>
+        private string _aliasGuard = "";
+
+        private bool EmitOverlapTail(StringBuilder sb, string simdBody)
+        {
+            if (!BodyIsIdempotent(out var written)) return false;
+            _aliasGuard = AliasGuard(written);
+
+            // 尾部是同一段向量体的第二份拷贝：内部所有合成标签都要改名，避免重定义
+            string tailBody = Regex.Replace(simdBody, @"\bgoto\s+(__[A-Za-z0-9_]+)", m => "goto " + m.Groups[1].Value + "_tail");
+            tailBody = Regex.Replace(tailBody, @"(?m)^(\s*)(__[A-Za-z0-9_]+)\s*:", m => m.Groups[1].Value + m.Groups[2].Value + "_tail:");
+            sb.AppendLine("    int total_end_ = __startIndex + __count;");
+            sb.AppendLine("    if (__count >= g_simdWidthInt && total_end_ > simd_end_" + _aliasGuard + ")");
+            sb.AppendLine("    {");
+            sb.AppendLine("        int si = total_end_ - g_simdWidthInt;");
+            sb.AppendLine("        simd_value<int> v_i = simd_value<int>::sequence(0, g_simdWidthInt) + si;");
+            foreach (var line in tailBody.Split('\n'))
+                if (!string.IsNullOrWhiteSpace(line))
+                    sb.Append("        ").AppendLine(line.TrimEnd());
+            sb.AppendLine("        __simd_exit_tail: ;");
+            sb.AppendLine("    }");
+            return true;
+        }
+
+        /// <summary>重叠尾部的前提：每个写入的数组元素只依赖自身下标，且该数组不被读取；
+        /// 这样重算重叠 lane 得到同一结果，重复写入无副作用。</summary>
+        private bool BodyIsIdempotent(out HashSet<ISymbol> written)
+        {
+            written = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+            if (_jobStruct == null || _methodSyntax.Body == null) return false;
+            foreach (var assign in _methodSyntax.Body.DescendantNodes().OfType<AssignmentExpressionSyntax>())
+            {
+                if (assign.Left is not ElementAccessExpressionSyntax target) return false;
+                // 复合赋值（|=、+= 等）读同一元素，重算重叠 lane 会重复累积
+                if (assign.Kind() != SyntaxKind.SimpleAssignmentExpression) return false;
+                if (target.ArgumentList.Arguments.Count != 1) return false;
+                if (target.ArgumentList.Arguments[0].Expression.ToString() != _idx) return false;
+                var sym = _semanticModel.GetSymbolInfo(target.Expression).Symbol;
+                if (sym == null) return false;
+                written.Add(sym);
+            }
+            if (written.Count == 0) return false;
+            // 只有 job 字段的数组才能安全地做别名判定：指针局部/参数无法在运行时比较基址
+            foreach (var access in _methodSyntax.Body.DescendantNodes().OfType<ElementAccessExpressionSyntax>())
+            {
+                if (_semanticModel.GetSymbolInfo(access.Expression).Symbol is not IFieldSymbol f
+                    || !SymbolEqualityComparer.Default.Equals(f.ContainingType, _jobStruct))
+                    return false;
+            }
+            foreach (var unary in _methodSyntax.Body.DescendantNodes().OfType<PrefixUnaryExpressionSyntax>()
+                         .Concat<ExpressionSyntax>(_methodSyntax.Body.DescendantNodes().OfType<PostfixUnaryExpressionSyntax>()))
+            {
+                if (unary is PrefixUnaryExpressionSyntax pre && pre.Operand is ElementAccessExpressionSyntax) return false;
+                if (unary is PostfixUnaryExpressionSyntax post && post.Operand is ElementAccessExpressionSyntax) return false;
+            }
+
+            foreach (var access in _methodSyntax.Body.DescendantNodes().OfType<ElementAccessExpressionSyntax>())
+            {
+                if (IsAssignmentTarget(access)) continue;
+                var sym = _semanticModel.GetSymbolInfo(access.Expression).Symbol;
+                if (sym != null && written.Contains(sym)) return false;
+            }
+            return true;
+        }
+
+        /// <summary>别名守卫：读取数组与写入数组同址时不能走重叠尾部（重叠 lane 会读到已写回的值）。</summary>
+        private string AliasGuard(HashSet<ISymbol> written)
+        {
+            var reads = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+            foreach (var access in _methodSyntax.Body!.DescendantNodes().OfType<ElementAccessExpressionSyntax>())
+            {
+                if (IsAssignmentTarget(access)) continue;
+                if (_semanticModel.GetSymbolInfo(access.Expression).Symbol is IFieldSymbol f) reads.Add(f);
+            }
+            var sb = new StringBuilder();
+            foreach (var w in written)
+                foreach (var r in reads)
+                    if (!SymbolEqualityComparer.Default.Equals(w, r))
+                        sb.Append(" && (const void*)").Append(w.Name).Append("_ptr != (const void*)").Append(r.Name).Append("_ptr");
+            return sb.ToString();
+        }
+        private static bool IsAssignmentTarget(ElementAccessExpressionSyntax access)
+            => access.Parent is AssignmentExpressionSyntax assign && assign.Left == access;
         private string GeneratePerLane(string scalarBody)
         {
             string body = scalarBody;
@@ -121,11 +223,16 @@ namespace NativeTranspiler.Analyzer
             return sb.ToString();
         }
 
-        private string RemainderLoop(string scalarBody)
+        private string RemainderLoop(string scalarBody, bool narrowOnly = false, string aliasFallback = "")
         {
             string substituted = scalarBody;
             var sb = new StringBuilder();
-            sb.AppendLine($"    for (int {_idx} = simd_end_; {_idx} < __startIndex + __count; ++{_idx})");
+            // 重叠尾部未执行时（批量不足或基址别名）标量循环必须覆盖尾部
+            string narrowGuard = narrowOnly
+                ? (aliasFallback.Length == 0 ? "__count < g_simdWidthInt && "
+                                             : "(__count < g_simdWidthInt || !(" + aliasFallback.Substring(4) + ")) && ")
+                : "";
+            sb.AppendLine($"    for (int {_idx} = simd_end_; {narrowGuard}{_idx} < __startIndex + __count; ++{_idx})");
             sb.AppendLine("    {");
             bool hr = substituted.Contains("return;");
             string doneLabel = $"__scalar_returned_{_idx}";

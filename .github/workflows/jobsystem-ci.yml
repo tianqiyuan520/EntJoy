@@ -45,6 +45,9 @@ jobs:
   framework-test:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    env:
+      # 该作业不装 ispc：真正的 ISPC 编译守护由 native-transpiler-regression 与 ispc-width-test 承担。
+      ENTJOY_SKIP_ISPC_COMPILE: '1'
     strategy:
       fail-fast: false
       matrix:
@@ -299,6 +302,30 @@ jobs:
           path: build-debug/Testing/
           retention-days: 14
 
+  # 数学门禁：与 native-math 共用同一套工具，但挂在发布门禁上，
+  # 保证改数学不会被「只跑 native-math」绕过。
+  math-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S tools/MathUlpCheck -B build-math -DCMAKE_BUILD_TYPE=Release -DENTJOY_MATH_ISA=avx2
+      - name: Build
+        run: cmake --build build-math --parallel 4
+      - name: Fastest gate
+        run: |
+          ./build-math/MathDomainCheck
+          ./build-math/MathUlpCheck
+      - name: High gate
+        run: |
+          ./build-math/MathDomainCheckHigh
+          ./build-math/MathUlpCheckHigh
+      - name: IEEE gate
+        run: |
+          ./build-math/MathDomainCheckIEEE
+          ./build-math/MathUlpCheckIEEE
+
   # 生成器回归（NativeTranspiler）：CI 里唯一会**真正编译生成物**的 job。
   # 背景：framework-test 用 -p:EnableNativeCompile=false 构建，NativeCompileTask 被条件跳过 ⇒
   # 生成的 C++/ISPC 从不被编译、静默降级标记（__ENTJOY_UNSUPPORTED）也从不被扫描。
@@ -414,7 +441,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $result = Invoke-TestProcess -FilePath (Join-Path $sampleDir 'EntJoySample.exe') -LogPath 'ci-reports/relationship-sample.log' -TimeoutSeconds 180
           if ($result -ne 0) { exit $result }
-          if (-not (Select-String -LiteralPath ci-reports/relationship-sample.log -SimpleMatch 'PASS: all Relationship scenarios.' -Quiet)) { throw 'Relationship sample did not finish its scenarios.' }
+          if (-not (Select-String -LiteralPath ci-reports/relationship-sample.log -Pattern '^PASS' -Quiet)) { throw 'Relationship sample did not finish its scenarios.' }
 
       - name: Negative check (marker gate must fail the build)
         shell: pwsh
@@ -632,7 +659,7 @@ jobs:
 
   release-gate:
     if: always()
-    needs: [workflow-validation, framework-test, relationship-test, windows-test, linux-debug, nuget-consumer-test, ispc-width-test, linux-sanitizers, native-transpiler-regression, arm64-native, extended-stress]
+    needs: [workflow-validation, framework-test, relationship-test, windows-test, linux-debug, math-gate, nuget-consumer-test, ispc-width-test, linux-sanitizers, native-transpiler-regression, arm64-native, extended-stress]
     runs-on: ubuntu-latest
     steps:
       - name: Summarize release checks

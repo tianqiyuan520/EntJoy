@@ -62,7 +62,7 @@ namespace EntJoy.ECS
 
         private void CompleteRelationWriteJobs(Entity source, ComponentType type)
         {
-            if (!type.IsMultiRelation && !type.IsExclusiveRelation && IsAlive(source)
+            if (!type.IsMultiRelation && !type.IsExclusiveTarget && IsAlive(source)
                 && GetEntityInfoRef(source.Id).Archetype.Has(type.Type))
                 CompleteEntityJobs(source);
             else
@@ -153,7 +153,7 @@ namespace EntJoy.ECS
                 return;
             }
             ValidateRelationshipEntity(target.ToEntity(), type, "target");
-            if (!type.IsAcyclicRelation) return;
+            if (!type.IsHierarchy) return;
             _relVisited.Clear();
             Entity current = target.ToEntity();
             while (IsAlive(current))
@@ -170,7 +170,10 @@ namespace EntJoy.ECS
         // A prepared chunk may move within the list during swap-pop; its native address stays stable.
         private static bool HasSharedColumns(Archetype archetype) => archetype.HasSharedColumns;
 
-        private nint PrepareRelationSlot(Archetype target, Entity source, nint excluded = 0)
+
+
+        // 同时给出地址与块下标：地址是稳定身份，下标让落盘时直接命中，省掉按地址回扫块表。
+        private PreparedChunk PrepareRelationSlot(Archetype target, Entity source, nint excluded = 0)
         {
             var location = GetEntityInfoRef(source.Id);
             var sourceArch = location.Archetype;
@@ -201,26 +204,35 @@ namespace EntJoy.ECS
                             Buffer.MemoryCopy((void*)sourceChunk.GetSharedValuePointer(from), (void*)chunk.GetSharedValuePointer(c), target.Types[c].Size, target.Types[c].Size);
                         }
                 }
-                return target.ChunkList[index].MemoryBlock;
+                return new PreparedChunk(target.ChunkList[index].MemoryBlock, index);
             }
             var chunks = target.ChunkList;
             for (int i = chunks.Count - 1; i >= 0; i--)
                 if (chunks[i].MemoryBlock != excluded && chunks[i].EntityCount < chunks[i].Capacity)
-                    return chunks[i].MemoryBlock;
+                    return new PreparedChunk(chunks[i].MemoryBlock, i);
             chunks.EnsureCapacity(chunks.Count + 1);
-            return chunks[target.CreateChunk()].MemoryBlock;
+            int created = target.CreateChunk();
+            return new PreparedChunk(chunks[created].MemoryBlock, created);
         }
 
-        private void AddToPreparedChunk(Archetype target, Entity entity, nint prepared,
+        private void AddToPreparedChunk(Archetype target, Entity entity, PreparedChunk prepared,
             out int chunkIndex, out int slot)
         {
-            if (prepared == 0 && HasSharedColumns(target)) prepared = PrepareRelationSlot(target, entity);
-            if (prepared == 0) { target.AddEntity(entity, out chunkIndex, out slot); return; }
+            if (!prepared.IsValid && HasSharedColumns(target)) prepared = PrepareRelationSlot(target, entity);
+            if (!prepared.IsValid) { target.AddEntity(entity, out chunkIndex, out slot); return; }
             var chunks = target.ChunkList;
+            // 地址才是稳定身份（块会在列表里 swap-pop），所以先验证下标仍指向同一个块，对不上才回扫。
+            if ((uint)prepared.Index < (uint)chunks.Count && chunks[prepared.Index].MemoryBlock == prepared.Pointer)
+            {
+                chunkIndex = prepared.Index;
+                slot = chunks[chunkIndex].EntityCount;
+                target.AddEntityToChunk(entity, chunkIndex);
+                return;
+            }
             for (int offset = 0; offset < chunks.Count; offset++)
             {
                 int i = chunks.Count - 1 - offset;
-                if (chunks[i].MemoryBlock != prepared) continue;
+                if (chunks[i].MemoryBlock != prepared.Pointer) continue;
                 chunkIndex = i;
                 slot = chunks[i].EntityCount;
                 target.AddEntityToChunk(entity, i);
@@ -246,7 +258,7 @@ namespace EntJoy.ECS
             bool hadEdge = old.IsValid && IsAlive(old.ToEntity());
 
             Entity previousOwner = default;
-            bool hasPreviousOwner = type.IsExclusiveRelation && target.IsValid
+            bool hasPreviousOwner = type.IsExclusiveTarget && target.IsValid
                 && FindExclusiveOwner(source, type, target, out previousOwner);
             var eventKind = hadEdge ? (target.IsValid ? ObserverEvents.Set : ObserverEvents.Removed)
                 : (target.IsValid ? ObserverEvents.Added : ObserverEvents.None);
@@ -273,7 +285,7 @@ namespace EntJoy.ECS
             bool found = false;
             foreach (var candidate in sources)
             {
-                if (candidate.Id == source.Id || !StillPointsToRelation(candidate, target.ToEntity(), type.Id)) continue;
+                if (candidate.Equals(source) || !StillPointsToRelation(candidate, target.ToEntity(), type.Id)) continue;
                 if (found) throw new InvalidOperationException("Exclusive relationship index contains multiple owners.");
                 previousOwner = candidate;
                 found = true;
@@ -282,12 +294,12 @@ namespace EntJoy.ECS
         }
 
         // 预留写入槽位：source 若还没有关系列则建列；旧主需要从它自己的关系列里移除。
-        private (nint SourceSlot, nint OwnerSlot) PrepareRelationSlots(Entity source, ComponentType type,
+        private (PreparedChunk SourceSlot, PreparedChunk OwnerSlot) PrepareRelationSlots(Entity source, ComponentType type,
             Archetype sourceArch, bool hadColumn, int sourceChunkIndex, Entity previousOwner, bool hasPreviousOwner)
         {
-            nint sourceSlot = hadColumn ? 0 : PrepareRelationSlot(GetComponentDestination(sourceArch, type, true), source);
+            PreparedChunk sourceSlot = hadColumn ? PreparedChunk.None : PrepareRelationSlot(GetComponentDestination(sourceArch, type, true), source);
             if (!hadColumn) sourceArch.PrepareEntityRemoval();
-            if (!hasPreviousOwner) return (sourceSlot, 0);
+            if (!hasPreviousOwner) return (sourceSlot, PreparedChunk.None);
 
             var ownerArch = GetEntityInfoRef(previousOwner.Id).Archetype;
             ownerArch.PrepareEntityRemoval();
@@ -295,7 +307,7 @@ namespace EntJoy.ECS
             // 旧主可能被搬进 source 刚腾出的那一块，避免把同一块既当来源又当目的。
             nint excluded = !hadColumn && ownerDestination == sourceArch
                 ? sourceArch.ChunkList[sourceChunkIndex].MemoryBlock : 0;
-            nint ownerSlot = PrepareRelationSlot(ownerDestination, previousOwner, excluded);
+            PreparedChunk ownerSlot = PrepareRelationSlot(ownerDestination, previousOwner, excluded);
             return (sourceSlot, ownerSlot);
         }
 
@@ -319,7 +331,7 @@ namespace EntJoy.ECS
         // 落盘：写新关系列、摘掉旧主的列、维护反向索引，最后派发通知。
         private void ApplyRelationChange(Entity source, ComponentType type, byte* value, int size, RelationSlot target,
             RelationSlot old, Entity previousOwner, bool hasPreviousOwner, HashSet<Entity> newSources,
-            nint sourceSlot, nint ownerSlot, RelationNotification notification, RelationNotification ownerNotification)
+            PreparedChunk sourceSlot, PreparedChunk ownerSlot, RelationNotification notification, RelationNotification ownerNotification)
         {
             AddComponentRawCore(source, type.Type, null, value, size, relationStorageOnly: true, preparedChunk: sourceSlot);
             if (hasPreviousOwner)
@@ -347,7 +359,7 @@ namespace EntJoy.ECS
             int count = Math.Max(1, type.MultiRelationMaxSlots);
             Span<RelationSlot> slots = count <= 64 ? stackalloc RelationSlot[count] : new RelationSlot[count];
             for (int i = 0; i < count; i++) slots[i] = ((RelationSlot*)value)[i];
-            nint prepared = PrepareRelationSlot(GetComponentDestination(arch, type, false), source);
+            PreparedChunk prepared = PrepareRelationSlot(GetComponentDestination(arch, type, false), source);
             arch.PrepareEntityRemoval();
             CheckRelationshipPreparation("unlink-prepared");
             RemoveComponentRawCore(source, type.Type, relationStorageOnly: true, preparedChunk: prepared);

@@ -38,9 +38,7 @@ namespace NativeTranspiler.Analyzer
             foreach (var t in CollectSignatureStructTypes(method))
                 sb.AppendLine($"#include \"{NativeTranspiler.GetStructHeaderFileName(t)}.h\"");
             sb.AppendLine();
-            sb.AppendLine(CodeTemplates.GenerateExportMacros());
-            sb.AppendLine();
-            sb.AppendLine(CodeTemplates.GenerateAtomicMacros());
+            sb.AppendLine("#include \"NativeGeneratedSupport.h\"");
             sb.AppendLine();
             sb.AppendLine(GenerateCppFunctionSignature(method, fullyQualified: true) + ";");
             return sb.ToString();
@@ -139,13 +137,12 @@ namespace NativeTranspiler.Analyzer
 
             var methodSyntax = SymbolHelper.GetMethodSyntax(method);
 
+            // EJ_* 标量数学入口定义在 NativeSIMD_math.h：所有 C++ TU 都要能解析
+            sb.AppendLine("#include \"NativeSIMD_math.h\"");
             if (autoSIMD == NativeTranspiler.AutoSIMD.Enabled)
             {
-                sb.AppendLine("#include \"NativeSIMD.h\"");
                 sb.AppendLine("#include \"SimdValue.h\"");
             }
-            else
-                sb.AppendLine("#include <cmath>");
 
             sb.AppendLine();
             sb.AppendLine(GenerateCppFunctionSignature(method, fullyQualified: true));
@@ -189,7 +186,7 @@ namespace NativeTranspiler.Analyzer
                 {
                     var translator = new CppPointerStatementTranslator(semanticModel, method, useFastMath);
                     var bodyCode = translator.Translate(methodSyntax.Body);
-                    sb.Append(bodyCode);
+                    sb.Append(CodeIndent.Shift(bodyCode, 1));
                 }
             }
             else if (methodSyntax?.ExpressionBody != null)
@@ -321,6 +318,14 @@ namespace NativeTranspiler.Analyzer
                 {
                     var ta = ((INamedTypeSymbol)param.Type).TypeArguments.FirstOrDefault();
                     nap[param.Name] = ta != null ? NativeTranspiler.MapCSharpTypeToCpp(ta) : "float";
+            // 作业结构体字段上的容器同样是 native array：并行作业的数组来自字段而不是方法参数，
+            // 只按参数建表会让 `_nativeArrayParams` 为空，元素读退化成 lane0 标量读。
+            if (method.ContainingType is { TypeKind: TypeKind.Struct } jobType)
+                foreach (var field in jobType.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic))
+                    if (NativeTranspiler.IsEntJoyContainerNamed(field.Type, Config.NativeArray)
+                        && field.Type is INamedTypeSymbol container)
+                        nap[field.Name] = NativeTranspiler.MapCSharpTypeToCpp(
+                            NativeTranspiler.GetContainerElementType(container));
                 }
             var innerFor = (forStmt.Statement is BlockSyntax ob)
                 ? ob.Statements.OfType<ForStatementSyntax>().FirstOrDefault() : null;

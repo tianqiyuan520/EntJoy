@@ -19,7 +19,6 @@ public struct EntityModeJob : IJobEntity {
 
         [Theory]
         [InlineData("Disabled")]
-        [InlineData("Vectorize")]
         public void ExistingEntityModes_StayAvailable(string mode)
             => Assert.DoesNotContain(Emit(mode).Diagnostics, d => d.Severity == DiagnosticSeverity.Error);
     }

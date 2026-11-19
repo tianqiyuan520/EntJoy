@@ -44,13 +44,13 @@
 
 ## 实体关系
 
-- 普通 `IRelationComponent` 为 N:1：每个 source 在同一种关系下至多一个 target，target 可以被多个 source 指向。`ExclusiveRelation` 再要求入边唯一，形成 1:1；新 source 接管时解除旧 source。`AcyclicRelation` 拒绝同类型的自环与间接环。
-- `MultiRelation` 为 M:N；MaxSlots=0 使用按完整 source ID/Version 存储的托管目标列表，MaxSlots≥2 使用定长槽列。重复边保持原状态，定长容量不足在提交前拒绝；`ExclusiveTarget` 约束每个 target 至多一个 source，转移时先准备再统一提交。无环约束用于单目标类型。
+- 普通 `IRelationComponent` 为 N:1：每个 source 在同一种关系下至多一个 target，target 可以被多个 source 指向。`RelationshipComponent(ExclusiveTarget = true)` 再要求目标持有者唯一，形成 1:1；新 source 接管时解除旧 source。`Hierarchy = true` 声明单父级并拒绝同类型的自环与间接环，删除联动由 `DeleteWithTarget` 独立声明。
+- `RelationshipComponent(Multiple = true)` 为 M:N；MaxTargets=0 使用按完整 source ID/Version 存储的托管目标列表，MaxTargets≥2（自动启用多目标） 使用定长槽列。重复边保持原状态，定长容量不足在提交前拒绝；`ExclusiveTarget = true` 约束每个 target 至多一个 source，转移时先准备再统一提交。无环约束用于单目标类型。
 - 目标列表保持插入顺序，超过 32 个目标时在准备阶段建立成员索引；批量删除同一大列表的多个目标使用一次保序压缩。目标列表是正向数据，成员索引随提交、复制与恢复同步维护。
 - 关系类型是 sequential unmanaged struct，首字段为偏移 0 的 `RelationSlot Target`，可以附带业务数据。Shared、Enableable、资源所有权 hook 及矛盾的关系属性组合在注册时拒绝；多槽字段数量、类型、偏移与总宽度必须匹配声明。
 - 空列使用 `RelationSlot.Default`，不能用全零槽表示无边。`HasComponent<TRel>` 只检查列存在；`TryGetRelationship<TRel>` 与 `HasRelationship` 检查两端完整 ID/Version。`GetRelationship` 无边时返回 default Entity，调用方需要区分实体 0 时使用 TryGet。
 - `AddRelationship` 建立或重绑目标并保留已有业务数据，相同目标重复 Add 是 no-op。普通 Add/Set/RemoveComponent、SetRaw、ECB 和 ParallelWriter 的组件写入走同一单目标关系维护逻辑；目标重绑不改变 Archetype，但更新变更标记。
-- 目标删除默认解除存活 source 的关系并移除对应关系列；`OnTargetDeleted(Cascade = true)` 将 source 纳入销毁闭包。单删、批删、Archetype 清空与 ECB 使用相同规则；批量返回数包含级联销毁。显式 `DestroyEntityCascade` 沿全部关系类型级联，迭代防环。
+- 目标删除默认解除存活 source 的关系并移除对应关系列；`RelationshipComponent(DeleteWithTarget = true)` 将 source 纳入销毁闭包。单删、批删、Archetype 清空与 ECB 使用相同规则；批量返回数包含级联销毁。显式 `DestroyEntityCascade` 沿全部关系类型级联，迭代防环。
 - 关系图删除先准备目的存储、共享头、通知和回收容量，再提交解除与销毁；同一存活 source 的多列解除合并为一次迁移，多目标仅解除命中的边。迁移保留其他组件的共享分组、Enabled 位和资源所有权。准备阶段失败保持原图；空准备 Chunk 可复用。普通无关系批删与任意进程级内存耗尽不提供整批回滚保证。
 - 多目标 Observer 以边为单位提供 Added、Removed、Destroyed，TRel.Target 标识该边，其他定长槽为规范空值；Clear 对每条有效边发送 Removed。普通 RemoveComponent 清除多目标正反状态并移除存在的列。source 销毁不重复发送 Removed，回调看到完整提交后的图。
 - 关系 Observer 在完整提交后、结构锁外通知：空边变有效边为 Added，重绑/整体替换为 Set，解除为 Removed，source 销毁只发 Destroyed。预建空列与重复 Add 不发关系事件；值快照使用完整 TRel。Observer 与组件 Dispose 中的同步 ECS 变更会拒绝，请记录 ECB。销毁中的 Dispose 异常会记录并继续清理已提交状态。
@@ -63,13 +63,13 @@
 - 原生关系筛选在 Chunk、Range 和紧凑 EntityBatch 入口按实体匹配，并与 Enabled 条件取交集。关系位图在调度时复制，Enabled 位图在依赖完成后读取；本次过滤缓冲保留到 Job 完成。零匹配 Chunk 不执行，IJobChunk 每个非空物理 Chunk 调用一次并读取传入掩码，IJobEntity 自动过滤。含关系的原生查询保守登记生命周期依赖；重绑后重新构建过滤数据。
 - 托管列表也支持 WithRelationship 的精确筛选，位图在调度时按旁表生成；原生内核不访问托管列表。列表类型不能作为 Execute 的关系列参数；单组件关系查询的 ReadOnlyComp1 对列表明确拒绝，业务组件仍可枚举。定长列提供只读参数及 Chunk 访问。
 - `GetRelationships(source, Span)`、`CopyRelationships(source, NativeList)` 提供正向目标副本，与反向复制使用相同拥有关系。NativeArray.ReadOnly 字段支持 C++/ISPC 数组 Job，只读借用保留到 Job 完成；GetUnsafeReadOnlyPtr 的调用方负责寿命、同步与只读约定。
-- 手写原生 IJobChunk 支持 Length/IsEnabled/位图读取，C++ 支持范围遍历，ISPC 使用受支持的实体循环。显式掩码访问与 AutoSIMD.Enabled 的组合报 NT031；使用 Disabled 或编译器 Vectorize。NativeDll 与 NativeTranspiled 的 ABI 均为 4，生成内核必须与运行时一致，不匹配时拒绝加载。
+- 手写原生 IJobChunk 支持 Length/IsEnabled/位图读取，C++ 支持范围遍历，ISPC 使用受支持的实体循环。显式掩码访问与 AutoSIMD.Enabled 的组合报 NT031；改用 AutoSIMD.Disabled。NativeDll 与 NativeTranspiled 的 ABI 均为 4，生成内核必须与运行时一致，不匹配时拒绝加载。
 - ECB 提供 SetRelationshipTarget/RemoveRelationship，主线程及托管 Job 可记录；ParallelWriter 版本要求 sortKey。目标设置保留已有业务数据，解除移除列；回放重新校验端点及约束，已失效的 source 跳过。普通并行命令的 key 为 0；同 writer、同 key 保持记录顺序，相同 key 的跨 writer 冲突不承诺胜者。C++/ISPC 内核的 ParallelWriter 方法不做自动转译。
 - ECB 的 AddRelationship 对单目标建立/重绑，对多目标追加；带 target 的 RemoveRelationship 删除一条多目标边，ClearRelationships 清空全部多目标边。无 target 的 RemoveRelationship 对多目标清空边、保留定长列。ParallelWriter 提供对应的 sortKey 重载，沿用每命令提交和失败批次消费规则。
 - Playback/PlaybackParallel 先在记录锁外等待 EntityManager 已跟踪的 Job，再捕获并消费一批记录；外部 Task 或独立记录 Job 由调用方先完成。命令失败抛 CommandPlaybackException，报告失败下标、writer 下标及后续未执行数；已提交前缀不隐式重放。Observer 新记录的命令留到下一次回放；禁止嵌套回放、在回放中释放 ECB 或移动 writer 表。
-- `SpawnFrom(prefab, count)` 与 `CloneEntities(sources)` 共用复制核心，结果去除 Prefab 标记并保留共享值、启用状态及业务数据。源集合须有效且无重复；单目标、定长槽和托管列表中的内部目标映射到副本，外部普通目标保持不变，外部已占用的 ExclusiveRelation/ExclusiveTarget 在复制前拒绝。其他业务字段中的 Entity 值按值复制；含所有权 hook 的共享组件不支持复制。
+- `SpawnFrom(prefab, count)` 与 `CloneEntities(sources)` 共用复制核心，结果去除 Prefab 标记并保留共享值、启用状态及业务数据。源集合须有效且无重复；单目标、定长槽和托管列表中的内部目标映射到副本，外部普通目标保持不变，外部已占用的 ExclusiveTarget 在复制前拒绝。其他业务字段中的 Entity 值按值复制；含所有权 hook 的共享组件不支持复制。
 - 复制的资源组件须注册 ICopyable 与 IDisposable hook；OnCopy 接收空目标值，抛异常时目标须可安全析构。钩子中拒绝同步 ECS 变更和可写组件借用，准备失败回收本次资源。整组实体与索引发布后才通知 Added；存储准备导致地址或布局变化时，失败也会保守使旧视图失效。
-- 每条关联独立的等级、冷却等可由边实体承载：两个单目标关系指向端点，普通组件保存边数据。两个端点声明 Cascade 时删除任一端点销毁边、保留另一端点。组复制显式包含边和需要重映射的端点；多条业务调用不是整批事务，同端点边的业务唯一性由应用决定。
+- 每条关联独立的等级、冷却等可由边实体承载：两个单目标关系指向端点，普通组件保存边数据。两个端点关系声明 DeleteWithTarget 时删除任一端点销毁边、保留另一端点。组复制显式包含边和需要重映射的端点；多条业务调用不是整批事务，同端点边的业务唯一性由应用决定。
 - 当前成本基线覆盖 1万/10万/100万 source。百万规模整组复制与宽目标删除存在较高的临时托管分配；随机图与长稳通过不表示这些操作适合每帧执行。基线只描述本机构建，不构成跨框架性能对比。
 
 ## ECS 查询和组件布局
@@ -280,20 +280,20 @@ foreach (var chunk in world.QueryChunks<A, B>())
 
 验收目标：C# Query foreach 耗时不超过 Unity Burst SystemAPI.Query；EntJoy 最快的 C# 遍历耗时不超过 Arch 最快的 C# 遍历。分别比较大小规模和双三组件，并标明 Query、Job 与直接 Chunk 入口及实际内核。预热后托管分配为 0 B/次。
 
-默认容量下 100,000 实体时，EntJoy C# 直接 Chunk 与 Arch 直接 Chunk 的成对比值为 1.03–1.06（双/三组件，同一构建内逐轮交替）。C++ Entity/Chunk Job 与 Unity Burst Job 是分别记录的其他入口，不能代替 C# Query 的验收。
+默认容量下 100,000 实体时，EntJoy C# 直接 Chunk 与 Arch 直接 Chunk 的成对读数随构建变化，见 `tools/EcsComparison/results/` 下按入口分档的日志，不在本文档写固定区间。C++ Entity/Chunk Job 与 Unity Burst Job 是分别记录的其他入口，不能代替 C# Query 的验收。
 
 ## 结构变更基准
 
-`tools/EcsComparison` 的 `--struct <实体数> <轮数>` 量四项逐实体结构变更：创建实体、销毁实体、添加组件、移除组件。两侧使用相同的逐实体调用语义，且都传**预解析的组件类型**（EntJoy `NewEntity(ComponentType[])`/`DestroyEntity`/`AddComponent`/`RemoveComponent`，Arch `Create`/`Destroy`/`Add`/`Remove`）；EntJoy 的 `NewEntity(params Type[])` 重载会在每次调用解析类型，与 Arch 的入口不同形，不用于对照。复位（预建或销毁）一律在计时之外，单次计时按轮取最小，输出每实体纳秒，并逐操作交错两侧、输出同批比值。轮数取 15：7 轮时同一构建的比值可漂 15%，15 轮稳定。Unity 未纳入，需要 Editor batchmode。
+`tools/EcsComparison` 的 `--struct <实体数> <轮数>` 量四项逐实体结构变更：创建实体、销毁实体、添加组件、移除组件。两侧使用相同的逐实体调用语义，且都传**预解析的组件类型**（EntJoy `NewEntity(ComponentType[])`/`DestroyEntity`/`AddComponent`/`RemoveComponent`，Arch `Create`/`Destroy`/`Add`/`Remove`）；EntJoy 的 `NewEntity(params Type[])` 重载会在每次调用解析类型，与 Arch 的入口不同形，不用于对照。复位（预建或销毁）一律在计时之外，单次计时按轮取最小，输出每实体纳秒，并逐操作交错两侧、输出同批比值。首轮是预热轮、不计入：首轮既带 JIT 增量，又落在全新建的 Chunk 上（复用槽位无需清槽），与后续轮不是同一份工作。默认 5 轮，同一构建重复三次的比值波动在 ±0.07 内。两侧都用非线程安全 World，EntJoy 的结构锁因此不计入读数。Unity 未纳入，需要 Editor batchmode。
 
 ```powershell
-dotnet run -c Release --project tools/EcsComparison/EcsComparison.csproj -- --struct 100000 15
+dotnet run -c Release --project tools/EcsComparison/EcsComparison.csproj -- --struct 100000 5
 dotnet run -c Release --project tools/EcsComparison/EcsComparison.csproj -- --query-snapshot 100000 300
 ```
 
 结构变更路径的每次调用包含 Archetype 迁移、实体搬运与借用失效；遍历性能不反映这部分成本，两者需分开验收。`--query-snapshot` 单独量「结构变更后的首次查询」与「紧随其后的查询」：前者重建 Chunk 快照、后者复用，差值即逐帧结构变更世界每查询每帧的重建成本，`--struct` 的批量结构变更看不到它。
 
-当前实现与 Arch 的相对位置：创建约 1.15 倍、添加组件约 1.06 倍、移除组件约 0.88 倍、销毁实体约 1.08 倍（10 万实体、25 轮成对取最小，`tools/EcsComparison/obj/struct-amend.txt`）。剩余差距来自入口的守卫层（空闲判定、结构锁、存活校验）与两套位置表写入（托管表加原生镜像），二者都是线程安全与原生定位所必需的。具体数值随实现变化，用上面的命令重新测量，不引用文档里的旧值。
+当前实现与 Arch 的相对位置：创建约 1.00 倍、添加组件约 1.10 倍、移除组件约 0.83 倍、销毁实体约 0.89 倍（10 万实体、5 轮成对取最小，`tools/EcsComparison/results/struct-entjoy-vs-arch-20261116-b.log`）。四项差额全部落在入口层：结构锁、Job 记账、原生镜像位置表写入，三者都是线程安全与原生定位所必需的；搬移本身（迁移、swap-pop、写新组件值）与 Arch 同序同量。具体数值随实现变化，用上面的命令重新测量，不引用文档里的旧值，也不与 `obj/` 下的历史记录混用。
 
 内存回收时机：销毁实体与移除组件保留空 Chunk 与 slab，避免为了合并 Chunk 而给其中每个实体重写位置索引。普通原型新增实体复用已有未满 Chunk；扫描游标在删除时回退，压缩和整批清空时重置。指定共享值的实体通过共享值匹配器选择未满 Chunk；未指定共享值的入口沿用末块分组。内存通过 `EntityManager.CompactChunks(float thresholdPercent = 30f)` 显式归还：它把利用率低于阈值的 Chunk 合并到前面共享值组合一致的未满 Chunk，并移除、归还空 Chunk。关卡切换、批量卸载后可按内存预算在安全点调用压缩。
 
@@ -301,7 +301,7 @@ dotnet run -c Release --project tools/EcsComparison/EcsComparison.csproj -- --qu
 
 `--ab-pair <臂A> <臂B> <轮数> [容量]` 只运行被测两臂并逐轮反转顺序，输出每轮比值与汇总。同一构建内重复该入口时，**最小值**可复现（两次重复相差不到 1%），中位数不可复现（同一构建内两次重复可相差约 18%）。因此判断改动是否有效只用最小值比值，且参与判断的两臂必须来自同一构建：给被测程序集增加测量代码会让对照实现的读数漂移，跨构建的绝对时间不可相减或相除。
 
-同容量对照使用 100,000 实体和相同标量内核。双组件 Chunk 容量为 1,000，EntJoy 两轮中位数为 29.143/26.949 μs，Arch 为 28.046/26.239 μs；三组件容量为 800，EntJoy 为 52.743/61.173 μs，Arch 为 51.722/49.428 μs。三组件轮间波动较大，结果不能证明稳定差距或将差距归因于某一项开销。当前采样未证明 C# Query 追平 Unity Burst Query，也未证明 EntJoy 最快 C# 遍历追平 Arch。
+同容量对照使用 100,000 实体和相同标量内核，双组件 Chunk 容量 1,000、三组件 800。三组件轮间波动较大，结果不能证明稳定差距，也不能把差距归因于某一项开销。当前采样未证明 C# Query 追平 Unity Burst Query，也未证明 EntJoy 最快 C# 遍历追平 Arch。具体数值见 `tools/EcsComparison/results/` 下按入口分档的日志，不写进本文档。
 
 轮间波动仍明显：EntJoy 100,000 实体三组件 Query 的轮间比值为 1.218，Unity 对应 Burst Query 为 1.217；1,024 实体 EntJoy 三组件 C++ Entity Job 为 1.885，Arch 双组件 Chunk 为 1.610。矩阵用于定位差距，不能由这些数据证明稳定排名或复杂工作负载的综合优势。Arch 三组件 InlineQuery 慢于自身 Chunk 的原因尚未定位。
 
@@ -396,6 +396,22 @@ Enabled、关系过滤、多 Archetype、复杂计算和调度依赖不在此矩
   生成器会在"生成物与是否引用 ECS"不一致时报 **NT029/NT030**（见边界文档 §4）。
 
 CI 全绿证明已覆盖路径通过；发布前仍应在目标平台运行 sanitizer、压力和长稳测试。
+
+## 原生数学内核的验证强度
+
+每个平台的内核都过同一套门禁（`tools/MathUlpCheck`：区间 ULP + 223 项定义域定点），但**执行环境**不同，能证明的范围也不同：
+
+| 平台 | 数值门禁在哪跑 | 覆盖强度 |
+|---|---|---|
+| AVX2 | CI 原生 + 本地 | 三档（Fastest / High / IEEE）都实跑，最强 |
+| SSE4.1 | CI 原生 + 本地 | 三档都实跑 |
+| AVX512 | CI 只做编译门禁；数值在本地 Windows Intel SDE 10.13.1 上跑通 | 托管 runner 上 SDE 会让被测进程 SIGSEGV，CI 里那一步是 best effort，不算门禁 |
+| NEON (aarch64) | CI 用 `qemu-aarch64` | 逻辑与类型正确，但没有真机；不反映真实微架构行为（`vdivq_f32` 延迟、实际吞吐） |
+| AArch32 | CI 用 `qemu-arm`，数学走标量回退 | 只验证回退路径 |
+
+因此：AVX512 与 NEON 的**正确性**有证据，**性能**没有。发布前若要依赖它们的吞吐，需要真机复测。
+
+`tan`/`sin`/`cos` 在 `|x| > 1e7` 时按 lane 走 libm：Cody-Waite 归约在该量级不可靠，内联路径会给出错误的周期性结果。这是有意的精度换性能取舍，不是缺陷。
 
 ## 调度与命令缓冲的错误边界
 
